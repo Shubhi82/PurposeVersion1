@@ -9,16 +9,15 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA_PATH = Path.home() / "Downloads" / "All_States_modeling.xlsx"
+DEFAULT_DATA_PATH = ROOT / "All_States_modeling.xlsx"
+
 TACTIC_COLUMNS = [
-    "DSP",
-    "LeadGen",
-    "Paid Search",
-    "Paid Social",
-    "Prescreen",
-    "Referrals",
-    "Sweepstakes",
+    "DSP", "LeadGen", "Paid Search", "Paid Social",
+    "Prescreen", "Referrals", "Sweepstakes",
 ]
+
+OUTCOME_COLUMNS = ["APPLICATIONS", "APPROVED", "ORIGINATIONS"]
+
 CHANNELS = ("DIGITAL", "PHYSICAL")
 PRODUCT_ALL_LABEL = "All Products"
 TIME_GRAINS = ("Weekly", "Fortnight")
@@ -36,12 +35,10 @@ def add_time_columns(df: pd.DataFrame, time_grain: str) -> pd.DataFrame:
         iso_week_start(year, week)
         for year, week in zip(enriched["ISO_YEAR"], enriched["ISO_WEEK"])
     ]
-
     if time_grain == "Weekly":
         enriched["period_number"] = enriched["ISO_WEEK"]
         enriched["period_id"] = (
-            enriched["ISO_YEAR"].astype(str)
-            + "-W"
+            enriched["ISO_YEAR"].astype(str) + "-W"
             + enriched["ISO_WEEK"].astype(str).str.zfill(2)
         )
         enriched["period_label"] = enriched["period_id"]
@@ -54,8 +51,7 @@ def add_time_columns(df: pd.DataFrame, time_grain: str) -> pd.DataFrame:
         for year, week in zip(enriched["ISO_YEAR"], enriched["fortnight_start_week"])
     ]
     enriched["period_id"] = (
-        enriched["ISO_YEAR"].astype(str)
-        + "-F"
+        enriched["ISO_YEAR"].astype(str) + "-F"
         + enriched["period_number"].astype(str).str.zfill(2)
     )
     enriched["period_label"] = enriched["period_id"]
@@ -65,19 +61,12 @@ def add_time_columns(df: pd.DataFrame, time_grain: str) -> pd.DataFrame:
 def get_available_products(df: pd.DataFrame, state: str) -> list[str]:
     products = (
         df.loc[df["STATE_CD"] == state, "PRODUCT_CD"]
-        .dropna()
-        .sort_values()
-        .unique()
-        .tolist()
+        .dropna().sort_values().unique().tolist()
     )
     return [PRODUCT_ALL_LABEL, *products]
 
 
-def filter_data(
-    df: pd.DataFrame,
-    state: str | None = None,
-    product: str | None = None,
-) -> pd.DataFrame:
+def filter_data(df: pd.DataFrame, state: str | None = None, product: str | None = None) -> pd.DataFrame:
     filtered = df.copy()
     if state:
         filtered = filtered.loc[filtered["STATE_CD"] == state]
