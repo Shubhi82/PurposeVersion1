@@ -11,7 +11,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_PATH      = ROOT / "All_States_modeling.xlsx"
 MARKETING_SPEND_PATH   = ROOT / "Marketing_Spend_Data.csv"
-ORIGINATIONS_PATH      = ROOT / "Originations_Data.csv"
+ORIGINATIONS_PATH      = ROOT / "Originations_Data.xlsx"
 
 TACTIC_COLUMNS = [
     "DSP",
