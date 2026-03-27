@@ -31,11 +31,14 @@ def fit_channel_models(model_df: pd.DataFrame) -> dict[str, ChannelModelResult]:
 
 def fit_single_channel_model(channel_df: pd.DataFrame, channel: str) -> ChannelModelResult:
     tactic_features = [
-        column
-        for column in TACTIC_COLUMNS
-        if column in channel_df.columns and channel_df[column].fillna(0).abs().sum() > 0
+        col for col in TACTIC_COLUMNS
+        if col in channel_df.columns and channel_df[col].fillna(0).abs().sum() > 0
     ]
-    dummy_features = sorted(column for column in channel_df.columns if column.startswith("F"))
+    # Accept F-, W_-, and BW_-prefixed dummies
+    dummy_features = sorted(
+        col for col in channel_df.columns
+        if col.startswith("F") or col.startswith("W_") or col.startswith("BW_")
+    )
     features = tactic_features + dummy_features
 
     if not features:
@@ -46,20 +49,16 @@ def fit_single_channel_model(channel_df: pd.DataFrame, channel: str) -> ChannelM
     model = sm.OLS(y, X).fit()
 
     predictions = model.predict(X).clip(lower=0)
-    fitted_frame = channel_df[
-        ["period_label", "period_start", "APPLICATIONS", "TOTAL_SPEND"]
-    ].copy()
-    fitted_frame["Predicted_Applications"] = predictions
+    fitted_frame = channel_df[["period_label", "period_start", "APPLICATIONS", "TOTAL_SPEND"]].copy()
+    fitted_frame["Predicted_Applications"] = predictions.values
     fitted_frame = fitted_frame.sort_values("period_start").reset_index(drop=True)
 
     coefficients = (
-        pd.DataFrame(
-            {
-                "feature": model.params.index,
-                "coefficient": model.params.values,
-                "p_value": model.pvalues.values,
-            }
-        )
+        pd.DataFrame({
+            "feature": model.params.index,
+            "coefficient": model.params.values,
+            "p_value": model.pvalues.values,
+        })
         .sort_values("feature")
         .reset_index(drop=True)
     )
@@ -72,6 +71,8 @@ def fit_single_channel_model(channel_df: pd.DataFrame, channel: str) -> ChannelM
         for row in top_tactics.itertuples(index=False)
     ]
 
+    period_col = "time_bucket" if "time_bucket" in channel_df.columns else "period_label"
+
     return ChannelModelResult(
         channel=channel,
         fitted_frame=fitted_frame,
@@ -79,5 +80,5 @@ def fit_single_channel_model(channel_df: pd.DataFrame, channel: str) -> ChannelM
         mape=compute_mape(fitted_frame["APPLICATIONS"], fitted_frame["Predicted_Applications"]),
         narrative=narrative,
         features_used=features,
-        periods_used=sorted(channel_df["time_bucket"].unique().tolist()),
+        periods_used=sorted(channel_df[period_col].unique().tolist()),
     )
