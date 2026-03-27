@@ -1,6 +1,6 @@
 # Marketing Analytics and Channel-Specific Modeling
 
-This repo now contains a Streamlit workflow built around `/Users/shubhivashistha/Downloads/All_States_modeling.xlsx` for state-level marketing analysis and regression modeling.
+This repo now contains a Streamlit workflow built around the consolidated modeling workbook in the repo, with automatic filename detection for deployed data files.
 
 ## Why DIGITAL and PHYSICAL are modeled separately
 
@@ -87,10 +87,22 @@ python3 -m pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-By default the app looks for:
+By default the app looks for the first available consolidated workbook from:
 
 ```text
+All_States_modeling_v2.xlsx
+All_States_modeling.xlsx
 /Users/shubhivashistha/Downloads/All_States_modeling.xlsx
+```
+
+For the EDA tabs, the app also auto-detects common raw-data filenames, including:
+
+```text
+Marketing Spend Data.csv
+Marketing_Spend_Data.csv
+Originations Data1 (1).xlsx
+Originations Data.xlsx
+Originations_Data.xlsx
 ```
 
 You can also upload the workbook directly inside the app.

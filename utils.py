@@ -15,8 +15,26 @@ DEFAULT_DATA_CANDIDATES = [
     Path.home() / "Downloads" / "All_States_modeling.xlsx",
 ]
 DEFAULT_DATA_PATH = next((path for path in DEFAULT_DATA_CANDIDATES if path.exists()), DEFAULT_DATA_CANDIDATES[0])
-MARKETING_SPEND_PATH   = ROOT / "Marketing_Spend_Data.csv"
-ORIGINATIONS_PATH      = ROOT / "Originations_Data.xlsx"
+MARKETING_SPEND_CANDIDATES = [
+    ROOT / "Marketing Spend Data.csv",
+    ROOT / "Marketing_Spend_Data.csv",
+    ROOT / "Marketing Spend Data (1).csv",
+]
+ORIGINATIONS_CANDIDATES = [
+    ROOT / "Originations Data1 (1).xlsx",
+    ROOT / "Originations Data1.xlsx",
+    ROOT / "Originations Data.xlsx",
+    ROOT / "Originations_Data.xlsx",
+    ROOT / "Originations_Data.csv",
+]
+MARKETING_SPEND_PATH = next(
+    (path for path in MARKETING_SPEND_CANDIDATES if path.exists()),
+    MARKETING_SPEND_CANDIDATES[0],
+)
+ORIGINATIONS_PATH = next(
+    (path for path in ORIGINATIONS_CANDIDATES if path.exists()),
+    ORIGINATIONS_CANDIDATES[0],
+)
 
 TACTIC_COLUMNS = [
     "DSP",
