@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
+from zipfile import BadZipFile
 
 import numpy as np
 import pandas as pd
@@ -72,6 +73,32 @@ def load_marketing_spend_raw(source) -> pd.DataFrame:
     return df
 
 
+def build_marketing_spend_fallback(model_df: pd.DataFrame) -> pd.DataFrame:
+    base_columns = ["ISO_YEAR", "ISO_WEEK", "STATE_CD", "PRODUCT_CD", "CHANNEL_CD"]
+    available = [column for column in base_columns + TACTIC_COLUMNS if column in model_df.columns]
+    fallback = model_df[available].copy()
+    fallback = fallback.melt(
+        id_vars=[column for column in base_columns if column in fallback.columns],
+        value_vars=[column for column in TACTIC_COLUMNS if column in fallback.columns],
+        var_name="DETAIL_TACTIC",
+        value_name="TOTAL_COST",
+    )
+    fallback["TOTAL_COST"] = pd.to_numeric(fallback["TOTAL_COST"], errors="coerce").fillna(0.0)
+    fallback = fallback.loc[fallback["TOTAL_COST"] > 0].reset_index(drop=True)
+    fallback.attrs["source_label"] = "fallback_modeling_workbook"
+    return fallback
+
+
+def load_marketing_spend_data(source, fallback_source: str | Path | BinaryIO | None = None) -> pd.DataFrame:
+    try:
+        return load_marketing_spend_raw(source)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, FileNotFoundError, ValueError):
+        if fallback_source is None:
+            raise
+        model_df = load_modeling_data(fallback_source)
+        return build_marketing_spend_fallback(model_df)
+
+
 def load_originations_raw(source) -> pd.DataFrame:
     """
     Load the raw Originations data for EDA.
@@ -122,6 +149,27 @@ def load_originations_raw(source) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df
+
+
+def build_originations_fallback(model_df: pd.DataFrame) -> pd.DataFrame:
+    base_columns = ["ISO_YEAR", "ISO_WEEK", "STATE_CD", "PRODUCT_CD", "CHANNEL_CD"]
+    available = [column for column in base_columns + OUTCOME_COLUMNS if column in model_df.columns]
+    fallback = model_df[available].copy()
+    for column in OUTCOME_COLUMNS:
+        if column not in fallback.columns:
+            fallback[column] = 0.0
+    fallback.attrs["source_label"] = "fallback_modeling_workbook"
+    return fallback
+
+
+def load_originations_data(source, fallback_source: str | Path | BinaryIO | None = None) -> pd.DataFrame:
+    try:
+        return load_originations_raw(source)
+    except (BadZipFile, pd.errors.EmptyDataError, pd.errors.ParserError, FileNotFoundError, ValueError):
+        if fallback_source is None:
+            raise
+        model_df = load_modeling_data(fallback_source)
+        return build_originations_fallback(model_df)
 
 
 # ---------------------------------------------------------------------------

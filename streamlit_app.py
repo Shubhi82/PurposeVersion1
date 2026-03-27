@@ -12,8 +12,10 @@ from data_processing import (
     build_channel_comparison_table,
     build_product_spend_series,
     build_tactic_time_series,
+    load_marketing_spend_data,
     load_marketing_spend_raw,
     load_modeling_data,
+    load_originations_data,
     load_originations_raw,
     ms_spend_by_channel,
     ms_spend_by_product,
@@ -116,12 +118,12 @@ def heatmap_fig(df: pd.DataFrame, title: str) -> go.Figure:
 
 @st.cache_data(show_spinner="Loading marketing spend data…")
 def auto_load_marketing_spend() -> pd.DataFrame:
-    return load_marketing_spend_raw(MARKETING_SPEND_PATH)
+    return load_marketing_spend_data(MARKETING_SPEND_PATH, fallback_source=DEFAULT_DATA_PATH)
 
 
 @st.cache_data(show_spinner="Loading originations data…")
 def auto_load_originations() -> pd.DataFrame:
-    return load_originations_raw(ORIGINATIONS_PATH)
+    return load_originations_data(ORIGINATIONS_PATH, fallback_source=DEFAULT_DATA_PATH)
 
 
 @st.cache_data(show_spinner="Loading modeling workbook…")
@@ -140,15 +142,20 @@ def cached_load_data(source: bytes) -> pd.DataFrame:
 
 def render_tab_marketing_spend() -> None:
     st.header("Exploratory Data Analysis — Marketing Spend")
-
-    if not MARKETING_SPEND_PATH.exists():
+    try:
+        df = auto_load_marketing_spend()
+    except Exception as exc:
         st.error(
-            f"Marketing spend file not found at `{MARKETING_SPEND_PATH}`. "
-            "Please ensure `Marketing_Spend_Data.csv` is in the project root directory."
+            "Unable to load marketing spend data. "
+            f"Checked `{MARKETING_SPEND_PATH.name}` and the default modeling workbook. Error: {exc}"
         )
         return
 
-    df = auto_load_marketing_spend()
+    if df.attrs.get("source_label") == "fallback_modeling_workbook":
+        st.info(
+            "Using fallback data derived from the consolidated modeling workbook because "
+            "`Marketing_Spend_Data.csv` is empty or unavailable."
+        )
 
     st.caption(
         f"**{len(df):,}** rows · "
@@ -233,15 +240,20 @@ def render_tab_marketing_spend() -> None:
 
 def render_tab_originations() -> None:
     st.header("Exploratory Data Analysis — Originations")
-
-    if not ORIGINATIONS_PATH.exists():
+    try:
+        df = auto_load_originations()
+    except Exception as exc:
         st.error(
-            f"Originations file not found at `{ORIGINATIONS_PATH}`. "
-            "Please ensure `Originations_Data.csv` is in the project root directory."
+            "Unable to load originations data. "
+            f"Checked `{ORIGINATIONS_PATH.name}` and the default modeling workbook. Error: {exc}"
         )
         return
 
-    df = auto_load_originations()
+    if df.attrs.get("source_label") == "fallback_modeling_workbook":
+        st.info(
+            "Using fallback outcomes derived from the consolidated modeling workbook because "
+            "`Originations_Data.xlsx` is empty or unavailable."
+        )
 
     total_apps = int(df["APPLICATIONS"].sum()) if "APPLICATIONS" in df.columns else 0
     total_appr = int(df["APPROVED"].sum()) if "APPROVED" in df.columns else 0

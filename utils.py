@@ -9,7 +9,12 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA_PATH      = ROOT / "All_States_modeling.xlsx"
+DEFAULT_DATA_CANDIDATES = [
+    ROOT / "All_States_modeling_v2.xlsx",
+    ROOT / "All_States_modeling.xlsx",
+    Path.home() / "Downloads" / "All_States_modeling.xlsx",
+]
+DEFAULT_DATA_PATH = next((path for path in DEFAULT_DATA_CANDIDATES if path.exists()), DEFAULT_DATA_CANDIDATES[0])
 MARKETING_SPEND_PATH   = ROOT / "Marketing_Spend_Data.csv"
 ORIGINATIONS_PATH      = ROOT / "Originations_Data.xlsx"
 
