@@ -8,7 +8,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from data_processing import (
-    aggregate_for_analysis,
     build_application_series,
     build_channel_comparison_table,
     build_product_spend_series,
@@ -35,6 +34,8 @@ from modeling import fit_channel_models
 from utils import (
     CHANNELS,
     DEFAULT_DATA_PATH,
+    MARKETING_SPEND_PATH,
+    ORIGINATIONS_PATH,
     OUTCOME_COLUMNS,
     PRODUCT_ALL_LABEL,
     TACTIC_COLUMNS,
@@ -68,26 +69,27 @@ def bar_h(df: pd.DataFrame, x: str, y: str, title: str, color: str | None = None
         color=color, color_discrete_sequence=PALETTE,
         text_auto=".3s",
     )
-    fig.update_layout(yaxis={"categoryorder": "total ascending"}, margin=dict(l=10, r=10, t=40, b=10))
+    fig.update_layout(
+        yaxis={"categoryorder": "total ascending"},
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
     return fig
 
 
 def bar_v(df: pd.DataFrame, x: str, y: str | list, title: str, barmode: str = "group") -> go.Figure:
     if isinstance(y, list):
-        fig = px.bar(df, x=x, y=y, title=title, barmode=barmode,
-                     color_discrete_sequence=PALETTE, text_auto=".3s")
+        fig = px.bar(
+            df, x=x, y=y, title=title, barmode=barmode,
+            color_discrete_sequence=PALETTE, text_auto=".3s",
+        )
     else:
-        fig = px.bar(df, x=x, y=y, title=title,
-                     color_discrete_sequence=PALETTE, text_auto=".3s")
+        fig = px.bar(df, x=x, y=y, title=title, color_discrete_sequence=PALETTE, text_auto=".3s")
     fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
 
 def line_chart(df: pd.DataFrame, x: str, y: str | list, title: str) -> go.Figure:
-    if isinstance(y, list):
-        fig = px.line(df, x=x, y=y, title=title, color_discrete_sequence=PALETTE, markers=True)
-    else:
-        fig = px.line(df, x=x, y=y, title=title, color_discrete_sequence=PALETTE, markers=True)
+    fig = px.line(df, x=x, y=y, title=title, color_discrete_sequence=PALETTE, markers=True)
     fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
@@ -109,69 +111,105 @@ def heatmap_fig(df: pd.DataFrame, title: str) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Tab 1 — EDA: Marketing Spend
+# Cached auto-loaders — read from files bundled with the repo
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
-def cached_ms(data: bytes) -> pd.DataFrame:
-    return load_marketing_spend_raw(data)
+@st.cache_data(show_spinner="Loading marketing spend data…")
+def auto_load_marketing_spend() -> pd.DataFrame:
+    return load_marketing_spend_raw(MARKETING_SPEND_PATH)
 
+
+@st.cache_data(show_spinner="Loading originations data…")
+def auto_load_originations() -> pd.DataFrame:
+    return load_originations_raw(ORIGINATIONS_PATH)
+
+
+@st.cache_data(show_spinner="Loading modeling workbook…")
+def auto_load_modeling(path: str) -> pd.DataFrame:
+    return load_modeling_data(Path(path))
+
+
+@st.cache_data(show_spinner=False)
+def cached_load_data(source: bytes) -> pd.DataFrame:
+    return load_modeling_data(source)
+
+
+# ---------------------------------------------------------------------------
+# Tab 1 — EDA: Marketing Spend  (auto-loaded, no upload)
+# ---------------------------------------------------------------------------
 
 def render_tab_marketing_spend() -> None:
     st.header("Exploratory Data Analysis — Marketing Spend")
-    uploaded = st.file_uploader(
-        "Upload Marketing_Spend_Data.csv", type=["csv"], key="ms_upload"
-    )
-    if uploaded is None:
-        st.info("Upload the Marketing_Spend_Data.csv file to begin EDA.")
+
+    if not MARKETING_SPEND_PATH.exists():
+        st.error(
+            f"Marketing spend file not found at `{MARKETING_SPEND_PATH}`. "
+            "Please ensure `Marketing_Spend_Data.csv` is in the project root directory."
+        )
         return
 
-    df = cached_ms(uploaded.getvalue())
-    st.caption(f"Loaded **{len(df):,}** rows across **{df['DETAIL_TACTIC'].nunique()}** tactics, "
-               f"**{df['STATE_CD'].nunique() if 'STATE_CD' in df.columns else '—'}** states.")
+    df = auto_load_marketing_spend()
 
-    # --- 1. Spend by Tactic ---
+    st.caption(
+        f"**{len(df):,}** rows · "
+        f"**{df['DETAIL_TACTIC'].nunique()}** tactics · "
+        f"**{df['STATE_CD'].nunique() if 'STATE_CD' in df.columns else '—'}** states"
+    )
+
+    # 1. Spend by Tactic
     st.subheader("1 · Spend by Tactic")
     tactic_df = ms_spend_by_tactic(df)
-    fig1 = bar_h(tactic_df, x="Total Spend ($)", y="Tactic", title="Total Spend by Tactic")
-    chart_with_table(fig1, tactic_df, "Spend by Tactic")
+    chart_with_table(
+        bar_h(tactic_df, x="Total Spend ($)", y="Tactic", title="Total Spend by Tactic"),
+        tactic_df, "Spend by Tactic",
+    )
 
-    # --- 2. Spend by Channel ---
+    # 2. Spend by Channel
     st.subheader("2 · Spend by Channel")
     channel_df = ms_spend_by_channel(df)
-    fig2 = bar_v(channel_df, x="Channel", y="Total Spend ($)", title="Total Spend by Channel")
-    chart_with_table(fig2, channel_df, "Spend by Channel")
+    chart_with_table(
+        bar_v(channel_df, x="Channel", y="Total Spend ($)", title="Total Spend by Channel"),
+        channel_df, "Spend by Channel",
+    )
 
-    # --- 3. Spend by State ---
+    # 3. Spend by State
     st.subheader("3 · Spend by State")
     state_df = ms_spend_by_state(df)
-    fig3 = bar_h(state_df, x="Total Spend ($)", y="State", title="Total Spend by State")
-    chart_with_table(fig3, state_df, "Spend by State")
+    chart_with_table(
+        bar_h(state_df, x="Total Spend ($)", y="State", title="Total Spend by State"),
+        state_df, "Spend by State",
+    )
 
-    # --- 4. Spend by Product ---
+    # 4. Spend by Product
     st.subheader("4 · Spend by Product")
     prod_df = ms_spend_by_product(df)
-    fig4 = bar_h(prod_df, x="Total Spend ($)", y="Product", title="Total Spend by Product")
-    chart_with_table(fig4, prod_df, "Spend by Product")
+    chart_with_table(
+        bar_h(prod_df, x="Total Spend ($)", y="Product", title="Total Spend by Product"),
+        prod_df, "Spend by Product",
+    )
 
-    # --- 5. Spend Over Time ---
+    # 5. Weekly Spend Over Time
     st.subheader("5 · Weekly Spend Over Time")
     time_df = ms_spend_over_time(df)
     if not time_df.empty:
-        fig5 = line_chart(time_df, x="period", y="TOTAL_COST", title="Weekly Total Spend Over Time")
-        chart_with_table(fig5, time_df[["period", "TOTAL_COST"]].rename(columns={"TOTAL_COST": "Spend ($)"}),
-                         "Weekly Spend")
+        chart_with_table(
+            line_chart(time_df, x="period", y="TOTAL_COST", title="Weekly Total Spend Over Time"),
+            time_df[["period", "TOTAL_COST"]].rename(columns={"TOTAL_COST": "Spend ($)"}),
+            "Weekly Spend",
+        )
     else:
         st.info("No time-series data available.")
 
-    # --- 6. Tactic × Channel Heatmap ---
+    # 6. Tactic × Channel Heatmap
     st.subheader("6 · Tactic × Channel Spend Heatmap")
     matrix_df = ms_tactic_channel_matrix(df)
     if not matrix_df.empty:
-        fig6 = heatmap_fig(matrix_df, "Spend Heatmap — Tactic × Channel")
-        chart_with_table(fig6, matrix_df, "Tactic × Channel Matrix")
+        chart_with_table(
+            heatmap_fig(matrix_df, "Spend Heatmap — Tactic × Channel"),
+            matrix_df, "Tactic × Channel Matrix",
+        )
 
-    # --- 7. Spend by State × Tactic (stacked bar) ---
+    # 7. Spend by State & Tactic (stacked bar)
     st.subheader("7 · Spend by State & Tactic")
     st_tactic = ms_spend_by_state_tactic(df)
     if not st_tactic.empty:
@@ -182,82 +220,93 @@ def render_tab_marketing_spend() -> None:
             labels={"STATE_CD": "State", "TOTAL_COST": "Spend ($)", "DETAIL_TACTIC": "Tactic"},
         )
         fig7.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-        table7 = st_tactic.rename(columns={"STATE_CD": "State", "DETAIL_TACTIC": "Tactic", "TOTAL_COST": "Spend ($)"})
-        chart_with_table(fig7, table7, "State × Tactic Spend")
+        chart_with_table(
+            fig7,
+            st_tactic.rename(columns={"STATE_CD": "State", "DETAIL_TACTIC": "Tactic", "TOTAL_COST": "Spend ($)"}),
+            "State × Tactic Spend",
+        )
 
 
 # ---------------------------------------------------------------------------
-# Tab 2 — EDA: Originations
+# Tab 2 — EDA: Originations  (auto-loaded, no upload)
 # ---------------------------------------------------------------------------
-
-@st.cache_data(show_spinner=False)
-def cached_od(data: bytes) -> pd.DataFrame:
-    return load_originations_raw(data)
-
 
 def render_tab_originations() -> None:
     st.header("Exploratory Data Analysis — Originations")
-    uploaded = st.file_uploader(
-        "Upload Originations_Data.xlsx", type=["csv"], key="od_upload"
-    )
-    if uploaded is None:
-        st.info("Upload the Originations_Data.xlsx file to begin EDA.")
+
+    if not ORIGINATIONS_PATH.exists():
+        st.error(
+            f"Originations file not found at `{ORIGINATIONS_PATH}`. "
+            "Please ensure `Originations_Data.csv` is in the project root directory."
+        )
         return
 
-    df = cached_od(uploaded.getvalue())
+    df = auto_load_originations()
+
     total_apps = int(df["APPLICATIONS"].sum()) if "APPLICATIONS" in df.columns else 0
     total_appr = int(df["APPROVED"].sum()) if "APPROVED" in df.columns else 0
     total_orig = int(df["ORIGINATIONS"].sum()) if "ORIGINATIONS" in df.columns else 0
     st.caption(
-        f"Loaded **{len(df):,}** rows · "
+        f"**{len(df):,}** rows · "
         f"Applications: **{total_apps:,}** · "
         f"Approved: **{total_appr:,}** · "
         f"Funded: **{total_orig:,}**"
     )
 
-    # --- 1. Metrics by State ---
+    # 1. Metrics by State
     st.subheader("1 · Applications, Approvals & Funding by State")
     state_df = od_metrics_by_state(df)
     metric_cols = [c for c in ["APPLICATIONS", "APPROVED", "ORIGINATIONS"] if c in state_df.columns]
-    fig1 = bar_v(state_df, x="State", y=metric_cols,
-                 title="Applications / Approvals / Funding by State", barmode="group")
-    chart_with_table(fig1, state_df, "Metrics by State")
+    chart_with_table(
+        bar_v(state_df, x="State", y=metric_cols,
+              title="Applications / Approvals / Funding by State", barmode="group"),
+        state_df, "Metrics by State",
+    )
 
-    # --- 2. Metrics by Channel ---
+    # 2. Metrics by Channel
     st.subheader("2 · Metrics by Channel")
     ch_df = od_metrics_by_channel(df)
     metric_cols2 = [c for c in ["APPLICATIONS", "APPROVED", "ORIGINATIONS"] if c in ch_df.columns]
-    fig2 = bar_v(ch_df, x="Channel", y=metric_cols2,
-                 title="Applications / Approvals / Funding by Channel", barmode="group")
-    chart_with_table(fig2, ch_df, "Metrics by Channel")
+    chart_with_table(
+        bar_v(ch_df, x="Channel", y=metric_cols2,
+              title="Applications / Approvals / Funding by Channel", barmode="group"),
+        ch_df, "Metrics by Channel",
+    )
 
-    # --- 3. Metrics by Product ---
+    # 3. Metrics by Product
     st.subheader("3 · Metrics by Product")
     prod_df = od_metrics_by_product(df)
     metric_cols3 = [c for c in ["APPLICATIONS", "APPROVED", "ORIGINATIONS"] if c in prod_df.columns]
-    fig3 = bar_h(prod_df.melt(id_vars=["Product"], value_vars=metric_cols3, var_name="Metric", value_name="Count"),
-                 x="Count", y="Product", title="Metrics by Product", color="Metric")
-    chart_with_table(fig3, prod_df, "Metrics by Product")
+    melted = prod_df.melt(id_vars=["Product"], value_vars=metric_cols3,
+                          var_name="Metric", value_name="Count")
+    chart_with_table(
+        bar_h(melted, x="Count", y="Product", title="Metrics by Product", color="Metric"),
+        prod_df, "Metrics by Product",
+    )
 
-    # --- 4. Weekly Trends ---
+    # 4. Weekly Trends
     st.subheader("4 · Weekly Trends — Applications, Approvals & Funding")
     time_df = od_metrics_over_time(df)
     if not time_df.empty:
         metric_cols4 = [c for c in ["APPLICATIONS", "APPROVED", "ORIGINATIONS"] if c in time_df.columns]
-        fig4 = line_chart(time_df, x="period", y=metric_cols4,
-                          title="Weekly Applications, Approvals & Funding Over Time")
-        chart_with_table(fig4, time_df[["period"] + metric_cols4], "Weekly Trends")
+        chart_with_table(
+            line_chart(time_df, x="period", y=metric_cols4,
+                       title="Weekly Applications, Approvals & Funding Over Time"),
+            time_df[["period"] + metric_cols4], "Weekly Trends",
+        )
 
-    # --- 5. Funnel Rates by State ---
+    # 5. Funnel Rates by State
     st.subheader("5 · Approval & Funding Rate by State")
     funnel_df = od_funnel_by_state(df)
     rate_cols = [c for c in ["Approval Rate (%)", "Funding Rate (%)"] if c in funnel_df.columns]
     if rate_cols:
-        fig5 = bar_v(funnel_df, x="State", y=rate_cols,
-                     title="Approval Rate & Funding Rate by State (%)", barmode="group")
-        chart_with_table(fig5, funnel_df[["State"] + rate_cols], "Funnel Rates by State")
+        chart_with_table(
+            bar_v(funnel_df, x="State", y=rate_cols,
+                  title="Approval Rate & Funding Rate by State (%)", barmode="group"),
+            funnel_df[["State"] + rate_cols], "Funnel Rates by State",
+        )
 
-    # --- 6. Channel × State Breakdown ---
+    # 6. Channel × State Breakdown
     st.subheader("6 · Channel × State Breakdown")
     cs_df = od_channel_state_matrix(df)
     if not cs_df.empty and "APPLICATIONS" in cs_df.columns:
@@ -268,18 +317,16 @@ def render_tab_originations() -> None:
             labels={"STATE_CD": "State", "APPLICATIONS": "Applications", "CHANNEL_CD": "Channel"},
         )
         fig6.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-        chart_with_table(fig6, cs_df.rename(columns={"STATE_CD": "State", "CHANNEL_CD": "Channel"}),
-                         "Channel × State Data")
+        chart_with_table(
+            fig6,
+            cs_df.rename(columns={"STATE_CD": "State", "CHANNEL_CD": "Channel"}),
+            "Channel × State Data",
+        )
 
 
 # ---------------------------------------------------------------------------
-# Tab 3 — Marketing Analysis (existing, upgraded)
+# Tab 3 — Marketing Analysis
 # ---------------------------------------------------------------------------
-
-@st.cache_data(show_spinner=False)
-def cached_load_data(source: bytes) -> pd.DataFrame:
-    return load_modeling_data(source)
-
 
 def render_channel_chart_expander(channel: str, chart_data: pd.DataFrame, metric_label: str) -> None:
     st.markdown(f"#### {channel}")
@@ -306,9 +353,11 @@ def render_product_bar_chart(channel: str, chart_data: pd.DataFrame) -> None:
     df_plot = chart_data.reset_index()
     period_col = df_plot.columns[0]
     value_cols = [c for c in df_plot.columns if c != period_col]
-    fig = px.bar(df_plot, x=period_col, y=value_cols, barmode="stack",
-                 color_discrete_sequence=PALETTE,
-                 labels={"value": "Spend ($)", "variable": "Tactic"})
+    fig = px.bar(
+        df_plot, x=period_col, y=value_cols, barmode="stack",
+        color_discrete_sequence=PALETTE,
+        labels={"value": "Spend ($)", "variable": "Tactic"},
+    )
     fig.update_layout(margin=dict(l=10, r=10, t=20, b=10))
     st.plotly_chart(fig, use_container_width=True)
     with st.expander("📋 View data"):
@@ -320,19 +369,21 @@ def render_model_panel(channel: str, result) -> None:
     mape_display = "N/A" if pd.isna(result.mape) else f"{format_metric(result.mape, 2)}%"
     st.metric("MAPE", mape_display)
 
-    # Y = Applications by Channel | X = Tactics + Week dummies
     st.caption(
         f"**Y-axis (dependent):** `Applications_{channel}` · "
         f"**X-axis (predictors):** channel-specific spend tactics + time dummies "
         f"({', '.join(result.periods_used[:4])}{' ...' if len(result.periods_used) > 4 else ''})."
     )
 
-    # Actual vs Predicted
-    chart_frame = result.fitted_frame.set_index("period_label")[["APPLICATIONS", "Predicted_Applications"]]
-    fig = px.line(chart_frame.reset_index(), x="period_label",
-                  y=["APPLICATIONS", "Predicted_Applications"],
-                  markers=True, color_discrete_sequence=PALETTE,
-                  labels={"value": "Applications", "variable": "Series", "period_label": "Period"})
+    chart_frame = result.fitted_frame.set_index("period_label")[
+        ["APPLICATIONS", "Predicted_Applications"]
+    ]
+    fig = px.line(
+        chart_frame.reset_index(), x="period_label",
+        y=["APPLICATIONS", "Predicted_Applications"],
+        markers=True, color_discrete_sequence=PALETTE,
+        labels={"value": "Applications", "variable": "Series", "period_label": "Period"},
+    )
     fig.update_layout(margin=dict(l=10, r=10, t=20, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -346,7 +397,6 @@ def render_model_panel(channel: str, result) -> None:
             use_container_width=True, hide_index=True,
         )
 
-    # Tactic coefficients
     tactic_coefs = result.coefficients.loc[
         result.coefficients["feature"].isin(TACTIC_COLUMNS),
         ["feature", "coefficient", "p_value"],
@@ -373,30 +423,25 @@ def render_model_panel(channel: str, result) -> None:
 
 
 def render_tab_marketing_analysis() -> None:
-    # --- File upload only (no workbook path shown) ---
+    # --- Load modeling workbook ---
     uploaded_file = st.file_uploader("Upload workbook (.xlsx)", type=["xlsx"], key="model_upload")
+    time_grain = st.selectbox("Aggregation", TIME_GRAINS)
 
-    col_agg, = st.columns([1])
-    with col_agg:
-        time_grain = st.selectbox("Aggregation", TIME_GRAINS)
-
-    if uploaded_file is None:
-        # Try default path silently
-        if DEFAULT_DATA_PATH.exists():
-            try:
-                data = load_modeling_data(DEFAULT_DATA_PATH)
-            except Exception:
-                st.info("Upload the consolidated workbook (.xlsx) to begin analysis.")
-                return
-        else:
-            st.info("Upload the consolidated workbook (.xlsx) to begin analysis.")
-            return
-    else:
+    if uploaded_file is not None:
         try:
             data = cached_load_data(uploaded_file.getvalue())
         except Exception as exc:
             st.error(f"Unable to load workbook: {exc}")
             return
+    elif DEFAULT_DATA_PATH.exists():
+        try:
+            data = auto_load_modeling(str(DEFAULT_DATA_PATH))
+        except Exception as exc:
+            st.error(f"Unable to load default workbook: {exc}")
+            return
+    else:
+        st.info("Upload the consolidated workbook (.xlsx) to begin analysis.")
+        return
 
     state_options = sorted(data["STATE_CD"].dropna().unique().tolist())
     c1, c2 = st.columns(2)
@@ -406,7 +451,7 @@ def render_tab_marketing_analysis() -> None:
         product = st.selectbox("PRODUCT (optional)", get_available_products(data, state))
 
     # ------------------------------------------------------------------ #
-    # Section 1: Marketing spend consistency
+    # Section 1: Marketing Spend Consistency
     # ------------------------------------------------------------------ #
     st.subheader("Section 1: Marketing Spend Consistency")
     tactic_series = build_tactic_time_series(
@@ -420,7 +465,7 @@ def render_tab_marketing_analysis() -> None:
         render_channel_chart_expander("PHYSICAL", tactic_series["PHYSICAL"], "spend")
 
     # ------------------------------------------------------------------ #
-    # Section 2: Product-level marketing consistency
+    # Section 2: Product-Level Marketing Consistency
     # ------------------------------------------------------------------ #
     st.subheader("Section 2: Product-Level Marketing Consistency")
     if product == PRODUCT_ALL_LABEL:
@@ -442,7 +487,7 @@ def render_tab_marketing_analysis() -> None:
             st.dataframe(product_comparison, use_container_width=True, hide_index=True)
 
     # ------------------------------------------------------------------ #
-    # Section 3: Applications, Approvals & Funding consistency
+    # Section 3: Applications, Approvals & Funding Consistency
     # ------------------------------------------------------------------ #
     st.subheader("Section 3: Applications, Approvals & Funding Consistency")
     application_series = build_application_series(
@@ -456,14 +501,12 @@ def render_tab_marketing_analysis() -> None:
         render_channel_chart_expander("PHYSICAL", application_series["PHYSICAL"], "outcomes")
 
     # ------------------------------------------------------------------ #
-    # Modeling section
+    # Modeling Section
     # ------------------------------------------------------------------ #
     st.subheader("Modeling Section")
 
-    # Separate product dropdown for modeling
-    model_product_options = get_available_products(data, state)
     model_product = st.selectbox(
-        "Product (modeling)", model_product_options, key="model_product",
+        "Product (modeling)", get_available_products(data, state), key="model_product",
         help="Select the product to model. Each channel is modeled separately.",
     )
 
