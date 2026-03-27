@@ -73,21 +73,50 @@ def load_marketing_spend_raw(source) -> pd.DataFrame:
 
 
 def load_originations_raw(source) -> pd.DataFrame:
-    """Load the raw Originations_Data CSV for EDA."""
+    """
+    Load the raw Originations data for EDA.
+    Supports both CSV and Excel (.xlsx) files.
+    """
+
+    # Handle uploaded files (bytes)
     if isinstance(source, bytes):
         source = BytesIO(source)
-    df = pd.read_csv(source)
+
+    # Detect file type and load accordingly
+    if isinstance(source, (str, Path)):
+        file_path = str(source).lower()
+
+        if file_path.endswith(".xlsx") or file_path.endswith(".xls"):
+            df = pd.read_excel(source, engine="openpyxl")
+        elif file_path.endswith(".csv"):
+            df = pd.read_csv(source)
+        else:
+            raise ValueError("Unsupported file format. Please provide CSV or Excel file.")
+
+    else:
+        # If it's already a buffer (e.g., BytesIO), try Excel first then CSV
+        try:
+            df = pd.read_excel(source, engine="openpyxl")
+        except Exception:
+            df = pd.read_csv(source)
+
+    # ---------------------------------------------------
+    # Standard cleaning
+    # ---------------------------------------------------
     df.columns = [str(c).strip() for c in df.columns]
 
+    # Date processing
     if "APPLICATION_DT" in df.columns:
         df["APPLICATION_DT"] = pd.to_datetime(df["APPLICATION_DT"], errors="coerce")
         df["ISO_YEAR"] = df["APPLICATION_DT"].dt.isocalendar().year.astype("Int64")
         df["ISO_WEEK"] = df["APPLICATION_DT"].dt.isocalendar().week.astype("Int64")
         df["MONTH"] = df["APPLICATION_DT"].dt.month
 
+    # Rename column if needed
     if "PRODUCT_CODE" in df.columns and "PRODUCT_CD" not in df.columns:
         df = df.rename(columns={"PRODUCT_CODE": "PRODUCT_CD"})
 
+    # Numeric conversions
     for col in ["APPLICATIONS", "APPROVED", "ORIGINATIONS"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
