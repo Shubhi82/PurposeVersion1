@@ -198,10 +198,10 @@ def cached_od(data: bytes) -> pd.DataFrame:
 def render_tab_originations() -> None:
     st.header("Exploratory Data Analysis — Originations")
     uploaded = st.file_uploader(
-        "Upload Originations_Data.csv", type=["csv"], key="od_upload"
+        "Upload Originations_Data.xlsx", type=["csv"], key="od_upload"
     )
     if uploaded is None:
-        st.info("Upload the Originations_Data.csv file to begin EDA.")
+        st.info("Upload the Originations_Data.xlsx file to begin EDA.")
         return
 
     df = cached_od(uploaded.getvalue())
