@@ -914,173 +914,7 @@ def render_tab_mmm_v3():
 
 
 # ---------------------------------------------------------------------------
-# Tab 5 — V1 vs V2 Comparison
-# ---------------------------------------------------------------------------
-
-def render_tab_comparison():
-    st.header("V1 (OLS) vs V2 (NNLS MMM) — Side-by-Side Comparison")
-    st.caption("Same data, same state/product. Two different modeling approaches.")
-
-    uploaded_file = st.file_uploader("Upload workbook (.xlsx)", type=["xlsx"], key="cmp_upload")
-    c1, c2 = st.columns(2)
-
-    if uploaded_file is not None:
-        try:
-            data = cached_load_data(uploaded_file.getvalue())
-        except Exception as exc:
-            st.error(f"Unable to load workbook: {exc}")
-            return
-    elif DEFAULT_DATA_PATH.exists():
-        try:
-            data = auto_load_modeling(str(DEFAULT_DATA_PATH))
-        except Exception as exc:
-            st.error(f"Unable to load default workbook: {exc}")
-            return
-    else:
-        st.info("Upload the consolidated workbook (.xlsx) to begin analysis.")
-        return
-
-    state_options = sorted(data["STATE_CD"].dropna().unique().tolist())
-    with c1:
-        state   = st.selectbox("State",   state_options,                        key="cmp_state")
-    with c2:
-        product = st.selectbox("Product", get_available_products(data, state),  key="cmp_product")
-
-    filtered = data[data["STATE_CD"] == state].copy()
-    if product != PRODUCT_ALL_LABEL:
-        filtered = filtered[filtered["PRODUCT_CD"] == product].copy()
-
-    if filtered.empty:
-        st.warning("No data for the selected state/product.")
-        return
-
-    # Fixed locked weights for comparison
-    locked_weights = WEIGHT_SCHEMES[list(WEIGHT_SCHEMES.keys())[0]]
-
-    for channel in CHANNELS:
-        st.subheader(f"{channel} channel")
-
-        # V1 — OLS
-        modeling_df = prepare_modeling_dataset(data, time_grain="Weekly", state=state,
-                                               product=None if product == PRODUCT_ALL_LABEL else product)
-        v1_result = None
-        if not modeling_df.empty:
-            try:
-                all_results = fit_channel_models(modeling_df)
-                v1_result   = all_results.get(channel)
-            except Exception:
-                pass
-
-        # V2 — NNLS MMM
-        v2_result = run_mmm_for_channel(filtered, channel, locked_weights)
-
-        col_v1, col_v2 = st.columns(2)
-
-        # ── V1 metrics ──
-        with col_v1:
-            st.markdown("#### V1 — OLS (time dummies)")
-            if v1_result:
-                mape_v1 = v1_result.mape
-                st.metric("MAPE",   f"{mape_v1:.2f}%" if not pd.isna(mape_v1) else "N/A")
-                st.metric("Method", "OLS — can produce negative coefficients")
-                chart = v1_result.fitted_frame.set_index("period_label")[
-                    ["APPLICATIONS", "Predicted_Applications"]
-                ]
-                fig = px.line(chart.reset_index(), x="period_label",
-                              y=["APPLICATIONS","Predicted_Applications"],
-                              markers=True, color_discrete_sequence=["#378ADD","#9FC8F0"],
-                              title="V1: Actual vs Predicted")
-                fig.update_layout(height=280, margin=dict(l=10,r=10,t=40,b=10),
-                                  legend=dict(orientation="h", y=-0.35, x=0.5, xanchor="center"))
-                st.plotly_chart(fig, use_container_width=True)
-                tac = v1_result.coefficients[v1_result.coefficients["feature"].isin(TACTIC_COLUMNS)]
-                neg = (tac["coefficient"] < 0).sum()
-                if neg > 0:
-                    st.warning(f"⚠️ {neg} tactic(s) have negative coefficients — not business-explainable.")
-                with st.expander("📋 V1 coefficients"):
-                    st.dataframe(tac[["feature","coefficient","p_value"]], use_container_width=True, hide_index=True)
-            else:
-                st.info("V1 model could not be fitted for this selection.")
-
-        # ── V2 metrics ──
-        with col_v2:
-            st.markdown("#### V2 — NNLS MMM (Fourier + Adstock + Hill)")
-            if v2_result:
-                avg_apps = v2_result["avg_test_apps"]
-                mae_pct  = v2_result["test_mae"] / max(avg_apps, 1) * 100
-                dw_ok    = 1.5 <= v2_result["dw"] <= 2.5
-
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Train MAPE", f"{v2_result['train_mape']:.1f}%")
-                m2.metric("Test MAPE",  f"{v2_result['test_mape']:.1f}%")
-                m3.metric("MAE %",      f"{mae_pct:.1f}%")
-
-                m4, m5, m6 = st.columns(3)
-                m4.metric("Train R²",  f"{v2_result['train_r2']:.3f}")
-                m5.metric("Test R²",   f"{v2_result['test_r2']:.3f}")
-                m6.metric("DW",        f"{v2_result['dw']:.2f}",
-                          delta="✓ clean" if dw_ok else "⚠ check",
-                          delta_color="normal" if dw_ok else "inverse")
-
-                fitted = v2_result["fitted"]
-                fig = go.Figure()
-                for split, color, dash in [("Train","#185FA5","solid"),("Test","#E24B4A","solid")]:
-                    sub = fitted[fitted["split"] == split]
-                    fig.add_trace(go.Scatter(x=sub["period_label"], y=sub["APPLICATIONS"],
-                                            mode="lines+markers", name=f"Actual ({split})",
-                                            line=dict(color=color, width=1.5), marker=dict(size=4)))
-                    fig.add_trace(go.Scatter(x=sub["period_label"], y=sub["Predicted"],
-                                            mode="lines", name=f"Predicted ({split})",
-                                            line=dict(color=color, width=1.5, dash="dash")))
-                fig.update_layout(height=280, title="V2: Actual vs Predicted",
-                                  margin=dict(l=10,r=10,t=40,b=10),
-                                  legend=dict(orientation="h", y=-0.35, x=0.5, xanchor="center"))
-                st.plotly_chart(fig, use_container_width=True)
-
-                neg_coefs = (v2_result["coef_df"]["coefficient"] < 0).sum()
-                if neg_coefs == 0:
-                    st.success("✅ All coefficients ≥ 0 — fully business-explainable.")
-
-                with st.expander("📋 V2 coefficients"):
-                    st.dataframe(v2_result["coef_df"], use_container_width=True, hide_index=True)
-            else:
-                st.info("V2 model could not be fitted for this selection.")
-
-        # ── Summary comparison table ──
-        if v1_result and v2_result:
-            avg_apps = v2_result["avg_test_apps"]
-            mae_pct  = v2_result["test_mae"] / max(avg_apps, 1) * 100
-            v1_tac   = v1_result.coefficients[v1_result.coefficients["feature"].isin(TACTIC_COLUMNS)]
-            neg_v1   = int((v1_tac["coefficient"] < 0).sum())
-
-            cmp_df = pd.DataFrame({
-                "Metric":  ["MAPE", "Negative coefficients", "Seasonality", "Prescreen treatment",
-                             "Digital tactics", "Optimizer"],
-                "V1 (OLS)": [
-                    f"{v1_result.mape:.2f}%" if not pd.isna(v1_result.mape) else "N/A",
-                    f"{neg_v1} (⚠️ present)" if neg_v1 > 0 else "0 ✓",
-                    "52 week dummies",
-                    "Raw weekly spend",
-                    "Raw spend",
-                    "OLS",
-                ],
-                "V2 (NNLS MMM)": [
-                    f"{v2_result['train_mape']:.1f}% train / {v2_result['test_mape']:.1f}% test",
-                    "0 ✅ (enforced by NNLS)",
-                    "4 Fourier features",
-                    f"Circular spread {locked_weights}",
-                    "Adstock + Hill saturation",
-                    "NNLS (non-negative)",
-                ],
-            })
-            st.markdown("#### Summary")
-            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
-
-        st.divider()
-
-
-# ---------------------------------------------------------------------------
-# Main — render all 5 tabs
+# Main — render all tabs
 # ---------------------------------------------------------------------------
 
 st.title("Marketing Analytics and Modeling")
@@ -1092,7 +926,6 @@ tabs = st.tabs([
     "🔬 Marketing Analysis",
     "🧪 Marketing Analysis V2",
     "🧩 Marketing Analysis V3",
-    "⚖️ V1 vs V2 Comparison",
 ])
 
 with tabs[0]:
@@ -1109,6 +942,3 @@ with tabs[3]:
 
 with tabs[4]:
     render_tab_mmm_v3()
-
-with tabs[5]:
-    render_tab_comparison()
