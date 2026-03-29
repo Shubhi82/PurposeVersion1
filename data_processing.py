@@ -20,6 +20,7 @@ from utils import (
 
 ALL_COMBOS_SHEET = "All_Combos"
 NUMERIC_COLUMNS = ["ISO_YEAR", "ISO_WEEK", "CHANNEL_FLAG", *TACTIC_COLUMNS, *OUTCOME_COLUMNS]
+WEEK_DUMMY_COLUMNS = [f"W_{week}" for week in range(1, 53)]
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +234,11 @@ def prepare_raw_mmm_dataset(
     merged["ISO_YEAR"] = pd.to_numeric(merged["ISO_YEAR"], errors="coerce").fillna(0).astype(int)
     merged["ISO_WEEK"] = pd.to_numeric(merged["ISO_WEEK"], errors="coerce").fillna(0).astype(int)
     merged = merged.loc[(merged["ISO_YEAR"] > 0) & (merged["ISO_WEEK"] > 0)].copy()
+
+    week_dummies = pd.get_dummies(merged["ISO_WEEK"], prefix="W")
+    week_dummies = week_dummies.reindex(columns=WEEK_DUMMY_COLUMNS, fill_value=0).astype(int)
+    merged = pd.concat([merged.reset_index(drop=True), week_dummies.reset_index(drop=True)], axis=1)
+
     merged["TOTAL_SPEND"] = merged[TACTIC_COLUMNS].sum(axis=1)
     merged["period_label"] = (
         merged["ISO_YEAR"].astype(str) + "-W" + merged["ISO_WEEK"].astype(str).str.zfill(2)

@@ -238,13 +238,16 @@ def transform_for_mmm(df: pd.DataFrame, weights: list, include_fourier: bool = T
 
 
 def build_mmm_feature_cols(df: pd.DataFrame, include_fourier: bool = True) -> list[str]:
-    fourier = []
+    seasonal = []
     if include_fourier:
-        fourier = [f"sin_{k}" for k in range(1, FOURIER_K + 1)] + \
-                  [f"cos_{k}" for k in range(1, FOURIER_K + 1)]
+        seasonal = [f"sin_{k}" for k in range(1, FOURIER_K + 1)] + \
+                   [f"cos_{k}" for k in range(1, FOURIER_K + 1)]
+    else:
+        # Drop W_1 as the baseline week to avoid perfect multicollinearity.
+        seasonal = [f"W_{week}" for week in range(2, 53)]
     prescreen = [f"{PRESCREEN_COL}_final"]
     digital   = [f"{c}_final" for c in ADSTOCK_COLS]
-    all_feats = fourier + prescreen + digital
+    all_feats = seasonal + prescreen + digital
     return [c for c in all_feats if c in df.columns]
 
 
@@ -820,7 +823,7 @@ def render_tab_mmm_v3():
 | State coverage | 4-state workbook only | all usable states from raw data |
 | Train period | 2024 + 2025 | 2024 + 2025 |
 | Test period | all non-train years | 2026 only |
-| Fourier seasonality | yes | no |
+| Seasonality control | Fourier pairs | week dummies (W_2...W_52) |
 | Prescreen handling | circular spread | circular spread |
 | Digital tactics | adstock + Hill | adstock + Hill |
 | Optimizer | NNLS | NNLS |
@@ -887,7 +890,8 @@ def render_tab_mmm_v3():
 
     state_detail = state_summary.loc[state_summary["STATE_CD"] == state].iloc[0]
     st.info(
-        f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · no Fourier features · "
+        f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · "
+        f"seasonality via week dummies (W_2...W_52) with no Fourier features · "
         f"adstock decay = {ADSTOCK_DECAY} · usable states = {len(eligible_states)} · "
         f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])}"
     )
