@@ -33,6 +33,7 @@ from data_processing import (
     od_metrics_by_state,
     od_metrics_over_time,
     prepare_modeling_dataset,
+    prepare_raw_mmm_dataset,
 )
 from modeling import fit_channel_models
 from utils import (
@@ -66,6 +67,8 @@ WEIGHT_SCHEMES = {
     "uniform    [0.20, 0.20, 0.20, 0.20, 0.20]":                 [0.20, 0.20, 0.20, 0.20, 0.20],
 }
 TRAIN_YEARS_V2   = [2024, 2025]
+TRAIN_YEARS_V3   = [2024, 2025]
+TEST_YEARS_V3    = [2026]
 ADSTOCK_DECAY    = 0.5
 FOURIER_K        = 2
 PRESCREEN_COL    = "Prescreen"
@@ -140,6 +143,12 @@ def auto_load_modeling(path: str):
 def cached_load_data(source: bytes):
     return load_modeling_data(source)
 
+@st.cache_data(show_spinner="Preparing raw all-state MMM dataset…")
+def auto_prepare_v3_dataset() -> pd.DataFrame:
+    marketing = load_marketing_spend_data(MARKETING_SPEND_PATH, fallback_source=DEFAULT_DATA_PATH)
+    originations = load_originations_data(ORIGINATIONS_PATH, fallback_source=DEFAULT_DATA_PATH)
+    return prepare_raw_mmm_dataset(marketing, originations)
+
 # ---------------------------------------------------------------------------
 # V2 MMM transformation helpers
 # ---------------------------------------------------------------------------
@@ -182,7 +191,7 @@ def _fourier_features(iso_week_series: pd.Series, k: int = 2) -> pd.DataFrame:
         feats[f"cos_{i}"] = np.cos(2 * np.pi * i * wk / P)
     return pd.DataFrame(feats, index=iso_week_series.index)
 
-def transform_for_mmm(df: pd.DataFrame, weights: list) -> pd.DataFrame:
+def transform_for_mmm(df: pd.DataFrame, weights: list, include_fourier: bool = True) -> pd.DataFrame:
     """
     Apply all V2 transformations in order:
       4. Prescreen circular spread
@@ -194,7 +203,7 @@ def transform_for_mmm(df: pd.DataFrame, weights: list) -> pd.DataFrame:
     g = df.copy().reset_index(drop=True)
 
     # Step 7 — Fourier (needs ISO_WEEK)
-    if "ISO_WEEK" in g.columns:
+    if include_fourier and "ISO_WEEK" in g.columns:
         fourier = _fourier_features(g["ISO_WEEK"], k=FOURIER_K)
         g = pd.concat([g, fourier], axis=1)
 
@@ -213,9 +222,11 @@ def transform_for_mmm(df: pd.DataFrame, weights: list) -> pd.DataFrame:
     return g
 
 
-def build_mmm_feature_cols(df: pd.DataFrame) -> list[str]:
-    fourier = [f"sin_{k}" for k in range(1, FOURIER_K + 1)] + \
-              [f"cos_{k}" for k in range(1, FOURIER_K + 1)]
+def build_mmm_feature_cols(df: pd.DataFrame, include_fourier: bool = True) -> list[str]:
+    fourier = []
+    if include_fourier:
+        fourier = [f"sin_{k}" for k in range(1, FOURIER_K + 1)] + \
+                  [f"cos_{k}" for k in range(1, FOURIER_K + 1)]
     prescreen = [f"{PRESCREEN_COL}_final"]
     digital   = [f"{c}_final" for c in ADSTOCK_COLS]
     all_feats = fourier + prescreen + digital
@@ -226,25 +237,33 @@ def run_mmm_for_channel(
     df: pd.DataFrame,
     channel: str,
     weights: list,
+    train_years: list[int] | None = None,
+    test_years: list[int] | None = None,
+    include_fourier: bool = True,
 ) -> dict | None:
     """
     Run the full V2 MMM pipeline for one channel.
     Returns a result dict or None if insufficient data.
     """
+    train_years = TRAIN_YEARS_V2 if train_years is None else train_years
+
     ch_df = df[df["CHANNEL_CD"] == channel].copy()
     if ch_df.empty:
         return None
 
     ch_df = ch_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
-    ch_df = transform_for_mmm(ch_df, weights)
+    ch_df = transform_for_mmm(ch_df, weights, include_fourier=include_fourier)
 
-    train = ch_df[ch_df["ISO_YEAR"].isin(TRAIN_YEARS_V2)].copy()
-    test  = ch_df[~ch_df["ISO_YEAR"].isin(TRAIN_YEARS_V2)].copy()
+    train = ch_df[ch_df["ISO_YEAR"].isin(train_years)].copy()
+    if test_years is None:
+        test = ch_df[~ch_df["ISO_YEAR"].isin(train_years)].copy()
+    else:
+        test = ch_df[ch_df["ISO_YEAR"].isin(test_years)].copy()
 
     if len(train) < 5 or test.empty:
         return None
 
-    feat_cols = build_mmm_feature_cols(ch_df)
+    feat_cols = build_mmm_feature_cols(ch_df, include_fourier=include_fourier)
     if not feat_cols:
         return None
 
@@ -286,16 +305,21 @@ def run_mmm_for_channel(
     contrib.insert(2, "Predicted", yhat_te)
 
     # Fitted frame (full)
+    modeled_df = ch_df[ch_df["ISO_YEAR"].isin(train_years + ([] if test_years is None else test_years))].copy() \
+        if test_years is not None else ch_df.copy()
     full_periods = (
-        ch_df["ISO_YEAR"].astype(str) + "-W" + ch_df["ISO_WEEK"].astype(str).str.zfill(2)
+        modeled_df["ISO_YEAR"].astype(str) + "-W" + modeled_df["ISO_WEEK"].astype(str).str.zfill(2)
     )
-    X_full   = np.column_stack([np.ones(len(ch_df)), ch_df[feat_cols].fillna(0).values])
+    X_full   = np.column_stack([np.ones(len(modeled_df)), modeled_df[feat_cols].fillna(0).values])
     yhat_all = np.clip(X_full @ coefs, 0, None)
     fitted = pd.DataFrame({
         "period_label": full_periods,
-        "APPLICATIONS": ch_df["APPLICATIONS"].fillna(0).values,
+        "APPLICATIONS": modeled_df["APPLICATIONS"].fillna(0).values,
         "Predicted":    yhat_all,
-        "split":        ["Train" if yr in TRAIN_YEARS_V2 else "Test" for yr in ch_df["ISO_YEAR"]],
+        "split": [
+            "Train" if yr in train_years else "Test"
+            for yr in modeled_df["ISO_YEAR"]
+        ],
     })
 
     coef_df = pd.DataFrame({
@@ -770,6 +794,109 @@ def render_tab_mmm_v2():
         st.divider()
 
 
+def render_tab_mmm_v3():
+    st.header("Marketing Analysis V3 — All States, No Fourier")
+
+    with st.expander("ℹ️ How V3 differs from V2", expanded=False):
+        st.markdown("""
+| | V2 | V3 |
+|---|---|---|
+| State coverage | 4-state workbook only | all usable states from raw data |
+| Train period | 2024 + 2025 | 2024 + 2025 |
+| Test period | all non-train years | 2026 only |
+| Fourier seasonality | yes | no |
+| Prescreen handling | circular spread | circular spread |
+| Digital tactics | adstock + Hill | adstock + Hill |
+| Optimizer | NNLS | NNLS |
+        """)
+
+    try:
+        base = auto_prepare_v3_dataset()
+    except Exception as exc:
+        st.error(f"Unable to prepare all-state MMM dataset from raw files: {exc}")
+        return
+
+    state_summary = (
+        base.assign(
+            is_train=base["ISO_YEAR"].isin(TRAIN_YEARS_V3).astype(int),
+            is_test=base["ISO_YEAR"].isin(TEST_YEARS_V3).astype(int),
+        )
+        .groupby("STATE_CD", dropna=False)
+        .agg(
+            spend_total=("TOTAL_SPEND", "sum"),
+            applications_total=("APPLICATIONS", "sum"),
+            train_rows=("is_train", "sum"),
+            test_rows=("is_test", "sum"),
+        )
+        .reset_index()
+    )
+    eligible_states = (
+        state_summary.loc[
+            (state_summary["spend_total"] > 0)
+            & (state_summary["applications_total"] > 0)
+            & (state_summary["train_rows"] > 0)
+            & (state_summary["test_rows"] > 0),
+            "STATE_CD",
+        ]
+        .sort_values()
+        .tolist()
+    )
+
+    if not eligible_states:
+        st.warning("No states have enough raw weekly data for the V3 train/test design.")
+        return
+
+    c1, c2, c3 = st.columns([2, 2, 3])
+    with c1:
+        state = st.selectbox("State", eligible_states, key="v3_state")
+    with c2:
+        product = st.selectbox("Product", get_available_products(base, state), key="v3_product")
+    with c3:
+        scheme_label = st.selectbox(
+            "Prescreen spread weights",
+            list(WEIGHT_SCHEMES.keys()),
+            index=0,
+            key="v3_weights",
+            help="Controls how Prescreen spend is distributed across 5 weeks.",
+        )
+
+    weights = WEIGHT_SCHEMES[scheme_label]
+    filtered = base[base["STATE_CD"] == state].copy()
+    if product != PRODUCT_ALL_LABEL:
+        filtered = filtered[filtered["PRODUCT_CD"] == product].copy()
+
+    if filtered.empty:
+        st.warning("No raw weekly data for the selected state/product.")
+        return
+
+    state_detail = state_summary.loc[state_summary["STATE_CD"] == state].iloc[0]
+    st.info(
+        f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · no Fourier features · "
+        f"adstock decay = {ADSTOCK_DECAY} · usable states = {len(eligible_states)} · "
+        f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])}"
+    )
+
+    for channel in CHANNELS:
+        st.subheader(f"{channel} channel")
+        with st.spinner(f"Running V3 MMM for {channel}…"):
+            result = run_mmm_for_channel(
+                filtered,
+                channel,
+                weights,
+                train_years=TRAIN_YEARS_V3,
+                test_years=TEST_YEARS_V3,
+                include_fourier=False,
+            )
+
+        if result is None:
+            st.info(f"Insufficient data for {channel} modeling under the V3 split.")
+            continue
+
+        avg_apps = result["avg_test_apps"]
+        render_mmm_channel_result(result, avg_apps)
+        st.divider()
+
+
 # ---------------------------------------------------------------------------
 # Tab 5 — V1 vs V2 Comparison
 # ---------------------------------------------------------------------------
@@ -948,6 +1075,7 @@ tabs = st.tabs([
     "📈 Originations EDA",
     "🔬 Marketing Analysis",
     "🧪 Marketing Analysis V2",
+    "🧩 Marketing Analysis V3",
     "⚖️ V1 vs V2 Comparison",
 ])
 
@@ -964,4 +1092,7 @@ with tabs[3]:
     render_tab_mmm_v2()
 
 with tabs[4]:
+    render_tab_mmm_v3()
+
+with tabs[5]:
     render_tab_comparison()

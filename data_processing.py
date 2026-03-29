@@ -172,6 +172,76 @@ def load_originations_data(source, fallback_source: str | Path | BinaryIO | None
         return build_originations_fallback(model_df)
 
 
+def prepare_raw_mmm_dataset(
+    marketing_df: pd.DataFrame,
+    originations_df: pd.DataFrame,
+    state: str | None = None,
+    product: str | None = None,
+) -> pd.DataFrame:
+    """Build a weekly state/channel/product MMM dataset from raw marketing and originations files."""
+    ms = marketing_df.copy()
+    od = originations_df.copy()
+
+    for frame in (ms, od):
+        frame["STATE_CD"] = frame["STATE_CD"].astype(str).str.strip().str.upper()
+        frame["CHANNEL_CD"] = frame["CHANNEL_CD"].astype(str).str.strip().str.upper()
+        if "PRODUCT_CD" in frame.columns:
+            frame["PRODUCT_CD"] = frame["PRODUCT_CD"].astype(str).str.strip()
+
+    ms = ms.loc[ms["CHANNEL_CD"].isin(CHANNELS)].copy()
+    od = od.loc[od["CHANNEL_CD"].isin(CHANNELS)].copy()
+
+    if state:
+        ms = ms.loc[ms["STATE_CD"] == state]
+        od = od.loc[od["STATE_CD"] == state]
+    if product and product != PRODUCT_ALL_LABEL:
+        ms = ms.loc[ms["PRODUCT_CD"] == product]
+        od = od.loc[od["PRODUCT_CD"] == product]
+
+    ms = ms.loc[ms["DETAIL_TACTIC"].isin(TACTIC_COLUMNS)].copy()
+    spend_keys = ["ISO_YEAR", "ISO_WEEK", "STATE_CD", "CHANNEL_CD", "PRODUCT_CD"]
+    spend = (
+        ms.pivot_table(
+            index=spend_keys,
+            columns="DETAIL_TACTIC",
+            values="TOTAL_COST",
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+        .reset_index()
+    )
+    spend.columns.name = None
+    for tactic in TACTIC_COLUMNS:
+        if tactic not in spend.columns:
+            spend[tactic] = 0.0
+
+    outcome_cols = [column for column in OUTCOME_COLUMNS if column in od.columns]
+    outcomes = (
+        od.groupby(spend_keys, dropna=False)[outcome_cols]
+        .sum()
+        .reset_index()
+    )
+    for column in OUTCOME_COLUMNS:
+        if column not in outcomes.columns:
+            outcomes[column] = 0.0
+
+    merged = outcomes.merge(spend, on=spend_keys, how="outer").fillna(0.0)
+    for column in TACTIC_COLUMNS + OUTCOME_COLUMNS:
+        if column not in merged.columns:
+            merged[column] = 0.0
+
+    merged["ISO_YEAR"] = pd.to_numeric(merged["ISO_YEAR"], errors="coerce").fillna(0).astype(int)
+    merged["ISO_WEEK"] = pd.to_numeric(merged["ISO_WEEK"], errors="coerce").fillna(0).astype(int)
+    merged = merged.loc[(merged["ISO_YEAR"] > 0) & (merged["ISO_WEEK"] > 0)].copy()
+    merged["TOTAL_SPEND"] = merged[TACTIC_COLUMNS].sum(axis=1)
+    merged["period_label"] = (
+        merged["ISO_YEAR"].astype(str) + "-W" + merged["ISO_WEEK"].astype(str).str.zfill(2)
+    )
+    merged = merged.sort_values(["STATE_CD", "CHANNEL_CD", "PRODUCT_CD", "ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # EDA aggregations — Marketing Spend
 # ---------------------------------------------------------------------------
