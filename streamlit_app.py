@@ -7,7 +7,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from scipy.optimize import nnls
+from sklearn.linear_model import LinearRegression
+
+try:
+    from scipy.optimize import nnls as scipy_nnls
+except Exception:
+    scipy_nnls = None
 
 from data_processing import (
     build_application_series,
@@ -77,6 +82,16 @@ ADSTOCK_COLS     = ["DSP", "LeadGen", "Paid Search", "Paid Social", "Referrals",
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def solve_nonnegative_least_squares(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, str]:
+    """Fit a non-negative linear model, preferring SciPy NNLS when available."""
+    if scipy_nnls is not None:
+        coefs, _ = scipy_nnls(X, y)
+        return coefs.astype(float), "scipy.nnls"
+
+    model = LinearRegression(fit_intercept=False, positive=True)
+    model.fit(X, y)
+    return np.asarray(model.coef_, dtype=float), "sklearn.LinearRegression(positive=True)"
 
 def chart_with_table(fig, table_df: pd.DataFrame, table_label: str = "View data") -> None:
     st.plotly_chart(fig, use_container_width=True)
@@ -272,8 +287,8 @@ def run_mmm_for_channel(
     y_tr = train["APPLICATIONS"].fillna(0).values.astype(float)
     y_te = test["APPLICATIONS"].fillna(0).values.astype(float)
 
-    # Step 9 — NNLS
-    coefs, _ = nnls(X_tr, y_tr)
+    # Step 9 — NNLS / positive fallback
+    coefs, solver_name = solve_nonnegative_least_squares(X_tr, y_tr)
     yhat_tr  = np.clip(X_tr @ coefs, 0, None)
     yhat_te  = np.clip(X_te @ coefs, 0, None)
 
@@ -340,6 +355,7 @@ def run_mmm_for_channel(
         "train_mape": round(_mape(y_tr, yhat_tr), 2),
         "test_mape":  round(_mape(y_te, yhat_te), 2),
         "dw":         round(_durbin_watson(y_tr - yhat_tr), 3),
+        "solver":     solver_name,
         "n_train":    len(train),
         "n_test":     len(test),
         "avg_test_apps": float(np.mean(y_te)) if len(y_te) > 0 else 0,
