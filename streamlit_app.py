@@ -168,11 +168,21 @@ def auto_load_originations():
 
 @st.cache_data(show_spinner="Loading modeling workbook…")
 def auto_load_modeling(path: str, time_grain: str = "Weekly"):
-    return load_modeling_data(Path(path), time_grain=time_grain)
+    try:
+        return load_modeling_data(Path(path), time_grain=time_grain)
+    except TypeError as exc:
+        if "unexpected keyword argument 'time_grain'" not in str(exc):
+            raise
+        return load_modeling_data(Path(path))
 
 @st.cache_data(show_spinner=False)
 def cached_load_data(source: bytes, time_grain: str = "Weekly"):
-    return load_modeling_data(source, time_grain=time_grain)
+    try:
+        return load_modeling_data(source, time_grain=time_grain)
+    except TypeError as exc:
+        if "unexpected keyword argument 'time_grain'" not in str(exc):
+            raise
+        return load_modeling_data(source)
 
 @st.cache_data(show_spinner="Preparing raw all-state MMM dataset…")
 def auto_prepare_v3_dataset(time_grain: str = "Weekly") -> pd.DataFrame:
