@@ -466,8 +466,53 @@ def _prepare_workbook_period_columns(df: pd.DataFrame, time_grain: str) -> pd.Da
         prepared["period_value"] = prepared["ISO_WEEK"].astype(int)
         prepared["period_label"] = (
             prepared["ISO_YEAR"].astype(str) + "-W" + prepared["period_value"].astype(str).str.zfill(2)
-        )
+    )
     return prepared
+
+
+def aggregate_v4_filtered_data(df: pd.DataFrame, time_grain: str) -> pd.DataFrame:
+    """After V4 rolled-up filtering, collapse to year-period-channel before modeling."""
+    prepared = _prepare_workbook_period_columns(df, time_grain)
+    settings = get_v3_time_settings(time_grain)
+    seasonal_features = list(settings["seasonal_features"])
+    group_cols = ["ISO_YEAR", "period_value", "CHANNEL_CD"]
+    sum_cols = [col for col in [*TACTIC_COLUMNS, *OUTCOME_COLUMNS, "TOTAL_SPEND"] if col in prepared.columns]
+    if not sum_cols:
+        return pd.DataFrame()
+
+    aggregated = (
+        prepared.groupby(group_cols, dropna=False)[sum_cols]
+        .sum()
+        .reset_index()
+        .sort_values(["ISO_YEAR", "period_value", "CHANNEL_CD"])
+        .reset_index(drop=True)
+    )
+
+    if "STATE_CD" in df.columns and not df["STATE_CD"].dropna().empty:
+        aggregated["STATE_CD"] = str(df["STATE_CD"].dropna().iloc[0]).strip().upper()
+    if "PRODUCT_CD" in df.columns and not df["PRODUCT_CD"].dropna().empty:
+        products = sorted(df["PRODUCT_CD"].dropna().astype(str).str.strip().unique().tolist())
+        aggregated["PRODUCT_CD"] = products[0] if len(products) == 1 else "Rolled Up"
+
+    if time_grain in {"Fortnight", "Fortnightly"}:
+        aggregated["ISO_WEEK"] = ((aggregated["period_value"] - 1) * 2) + 1
+        aggregated["period_label"] = (
+            aggregated["ISO_YEAR"].astype(str) + "-BW" + aggregated["period_value"].astype(str).str.zfill(2)
+        )
+    else:
+        aggregated["ISO_WEEK"] = aggregated["period_value"].astype(int)
+        aggregated["period_label"] = (
+            aggregated["ISO_YEAR"].astype(str) + "-W" + aggregated["period_value"].astype(str).str.zfill(2)
+        )
+
+    for feature in seasonal_features:
+        aggregated[feature] = 0.0
+    for idx, row in aggregated.iterrows():
+        dummy_name = seasonal_features[row["period_value"] - 2] if row["period_value"] >= 2 and row["period_value"] - 2 < len(seasonal_features) else None
+        if dummy_name and dummy_name in aggregated.columns:
+            aggregated.at[idx, dummy_name] = 1.0
+
+    return aggregated
 
 
 def run_workbook_rolling_regression(
@@ -476,6 +521,7 @@ def run_workbook_rolling_regression(
     time_grain: str = "Weekly",
     train_years: list[int] | None = None,
     test_years: list[int] | None = None,
+    min_train_rows: int = 5,
 ) -> dict | None:
     """Simple rolling regression using workbook tactics + workbook time dummies."""
     train_years = TRAIN_YEARS_V3 if train_years is None else train_years
@@ -491,7 +537,7 @@ def run_workbook_rolling_regression(
 
     train = ch_df[ch_df["ISO_YEAR"].isin(train_years)].copy()
     test = ch_df[ch_df["ISO_YEAR"].isin(test_years)].copy()
-    if len(train) < 5 or test.empty:
+    if len(train) < min_train_rows or test.empty:
         return None
 
     seasonal_features = list(get_v3_time_settings(time_grain)["seasonal_features"])
@@ -536,7 +582,7 @@ def run_workbook_rolling_regression(
         )
         step_train = ch_df[ch_df["ISO_YEAR"].isin(train_years) | prior_test_mask].copy()
         period_rows = ch_df[(ch_df["ISO_YEAR"] == year) & (ch_df["period_value"] == period_value)].copy()
-        if len(step_train) < 5 or period_rows.empty:
+        if len(step_train) < min_train_rows or period_rows.empty:
             continue
 
         step_model = LinearRegression()
@@ -1329,7 +1375,8 @@ def render_tab_mmm_v4():
         [
             "Uses the default workbook sheet for the selected Weekly or Fortnight view.",
             "Keeps only rolled-up products like ILP/FLC, ILP/PDL, LOC/FLC, and PDL/FLC.",
-            "Runs the same simple rolling 2026 regression separately for DIGITAL and PHYSICAL.",
+            "Re-aggregates the filtered rolled-up data to year-period-channel before modeling.",
+            "Runs rolling 2026 regression separately for DIGITAL and PHYSICAL and requires at least 20 train rows.",
         ],
         note="No upload and no Direct Mail summary section in this version.",
     )
@@ -1384,22 +1431,35 @@ def render_tab_mmm_v4():
     filtered = base[base["STATE_CD"] == state].copy()
     if product != PRODUCT_ALL_LABEL:
         filtered = filtered[filtered["PRODUCT_CD"] == product].copy()
+    filtered = aggregate_v4_filtered_data(filtered, time_grain=time_grain)
 
     if filtered.empty:
         st.warning("No rolled-up product data for the selected V4 state/product.")
         return
 
-    state_detail = state_summary.loc[state_summary["STATE_CD"] == state].iloc[0]
+    selected_train_rows = int(filtered.loc[filtered["ISO_YEAR"].isin(TRAIN_YEARS_V3)].shape[0])
+    selected_test_rows = int(filtered.loc[filtered["ISO_YEAR"].isin(TEST_YEARS_V3)].shape[0])
     st.info(
         f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · "
         f"seasonality via {time_settings['seasonality_label']} · "
         f"rolling 2026 {time_settings['test_unit_label']} · "
-        f"rolled-up products only · simple regression only · "
-        f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])}"
+        f"rolled-up products only · re-aggregated to year-period-channel · simple regression only · "
+        f"selected state train rows = {selected_train_rows}, test rows = {selected_test_rows}"
     )
 
     for channel in CHANNELS:
         st.subheader(f"{channel} channel")
+        channel_train_rows = int(
+            filtered.loc[
+                (filtered["CHANNEL_CD"] == channel) & (filtered["ISO_YEAR"].isin(TRAIN_YEARS_V3))
+            ].shape[0]
+        )
+        if channel_train_rows < 20:
+            st.warning(
+                f"{channel} has only {channel_train_rows} rolled-up training rows after re-aggregation. "
+                "V4 needs at least 20 train rows."
+            )
+            continue
         with st.spinner(f"Running V4 regression for {channel}…"):
             result = run_workbook_rolling_regression(
                 filtered,
@@ -1407,10 +1467,11 @@ def render_tab_mmm_v4():
                 time_grain=time_grain,
                 train_years=TRAIN_YEARS_V3,
                 test_years=TEST_YEARS_V3,
+                min_train_rows=20,
             )
 
         if result is None:
-            st.info(f"Insufficient data for {channel} modeling under the V4 split.")
+            st.info(f"Insufficient rolled-up data for {channel} modeling under the V4 split.")
             continue
 
         avg_apps = result["avg_test_apps"]
