@@ -158,12 +158,12 @@ def auto_load_originations():
     return load_originations_data(ORIGINATIONS_PATH, fallback_source=DEFAULT_DATA_PATH)
 
 @st.cache_data(show_spinner="Loading modeling workbook…")
-def auto_load_modeling(path: str):
-    return load_modeling_data(Path(path))
+def auto_load_modeling(path: str, time_grain: str = "Weekly"):
+    return load_modeling_data(Path(path), time_grain=time_grain)
 
 @st.cache_data(show_spinner=False)
-def cached_load_data(source: bytes):
-    return load_modeling_data(source)
+def cached_load_data(source: bytes, time_grain: str = "Weekly"):
+    return load_modeling_data(source, time_grain=time_grain)
 
 @st.cache_data(show_spinner="Preparing raw all-state MMM dataset…")
 def auto_prepare_v3_dataset(time_grain: str = "Weekly") -> pd.DataFrame:
@@ -902,13 +902,13 @@ def render_tab_marketing_analysis():
 
     if uploaded_file is not None:
         try:
-            data = cached_load_data(uploaded_file.getvalue())
+            data = cached_load_data(uploaded_file.getvalue(), time_grain=time_grain)
         except Exception as exc:
             st.error(f"Unable to load workbook: {exc}")
             return
     elif DEFAULT_DATA_PATH.exists():
         try:
-            data = auto_load_modeling(str(DEFAULT_DATA_PATH))
+            data = auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain=time_grain)
         except Exception as exc:
             st.error(f"Unable to load default workbook: {exc}")
             return
@@ -1003,13 +1003,13 @@ def render_tab_mmm_v2():
 
     if uploaded_file is not None:
         try:
-            data = cached_load_data(uploaded_file.getvalue())
+            data = cached_load_data(uploaded_file.getvalue(), time_grain="Weekly")
         except Exception as exc:
             st.error(f"Unable to load workbook: {exc}")
             return
     elif DEFAULT_DATA_PATH.exists():
         try:
-            data = auto_load_modeling(str(DEFAULT_DATA_PATH))
+            data = auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain="Weekly")
         except Exception as exc:
             st.error(f"Unable to load default workbook: {exc}")
             return

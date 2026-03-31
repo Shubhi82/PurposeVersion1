@@ -22,6 +22,11 @@ from utils import (
 
 
 ALL_COMBOS_SHEET = "All_Combos"
+MODELING_SHEET_MAP = {
+    "Weekly": "Weekly_Data",
+    "Fortnight": "Fortnightly_Data",
+    "Fortnightly": "Fortnightly_Data",
+}
 NUMERIC_COLUMNS = ["ISO_YEAR", "ISO_WEEK", "CHANNEL_FLAG", *TACTIC_COLUMNS, *OUTCOME_COLUMNS]
 WEEK_DUMMY_COLUMNS = [f"W_{week}" for week in range(1, 53)]
 BIWEEK_DUMMY_COLUMNS = [f"BW_{bw}" for bw in range(1, 27)]
@@ -31,10 +36,19 @@ BIWEEK_DUMMY_COLUMNS = [f"BW_{bw}" for bw in range(1, 27)]
 # Loaders
 # ---------------------------------------------------------------------------
 
-def load_modeling_data(source: str | Path | BinaryIO) -> pd.DataFrame:
+def load_modeling_data(source: str | Path | BinaryIO, time_grain: str = "Weekly") -> pd.DataFrame:
     if isinstance(source, bytes):
         source = BytesIO(source)
-    df = pd.read_excel(source, sheet_name=ALL_COMBOS_SHEET, engine="openpyxl")
+    workbook = pd.ExcelFile(source, engine="openpyxl")
+    preferred_sheet = MODELING_SHEET_MAP.get(time_grain, ALL_COMBOS_SHEET)
+    if preferred_sheet in workbook.sheet_names:
+        sheet_name = preferred_sheet
+    elif ALL_COMBOS_SHEET in workbook.sheet_names:
+        sheet_name = ALL_COMBOS_SHEET
+    else:
+        sheet_name = workbook.sheet_names[0]
+
+    df = pd.read_excel(workbook, sheet_name=sheet_name, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
     expected = {"STATE_CD", "PRODUCT_CD", "CHANNEL_CD", "APPLICATIONS", *TACTIC_COLUMNS}
@@ -100,7 +114,7 @@ def load_marketing_spend_data(source, fallback_source: str | Path | BinaryIO | N
     except (pd.errors.EmptyDataError, pd.errors.ParserError, FileNotFoundError, ValueError):
         if fallback_source is None:
             raise
-        model_df = load_modeling_data(fallback_source)
+        model_df = load_modeling_data(fallback_source, time_grain="Weekly")
         return build_marketing_spend_fallback(model_df)
 
 
@@ -173,7 +187,7 @@ def load_originations_data(source, fallback_source: str | Path | BinaryIO | None
     except (BadZipFile, pd.errors.EmptyDataError, pd.errors.ParserError, FileNotFoundError, ValueError):
         if fallback_source is None:
             raise
-        model_df = load_modeling_data(fallback_source)
+        model_df = load_modeling_data(fallback_source, time_grain="Weekly")
         return build_originations_fallback(model_df)
 
 
