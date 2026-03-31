@@ -159,10 +159,10 @@ def cached_load_data(source: bytes):
     return load_modeling_data(source)
 
 @st.cache_data(show_spinner="Preparing raw all-state MMM dataset…")
-def auto_prepare_v3_dataset() -> pd.DataFrame:
+def auto_prepare_v3_dataset(time_grain: str = "Weekly") -> pd.DataFrame:
     marketing = load_marketing_spend_data(MARKETING_SPEND_PATH, fallback_source=DEFAULT_DATA_PATH)
     originations = load_originations_data(ORIGINATIONS_PATH, fallback_source=DEFAULT_DATA_PATH)
-    return prepare_raw_mmm_dataset(marketing, originations)
+    return prepare_raw_mmm_dataset(marketing, originations, time_grain=time_grain)
 
 # ---------------------------------------------------------------------------
 # V2 MMM transformation helpers
@@ -206,6 +206,22 @@ def _fourier_features(iso_week_series: pd.Series, k: int = 2) -> pd.DataFrame:
         feats[f"cos_{i}"] = np.cos(2 * np.pi * i * wk / P)
     return pd.DataFrame(feats, index=iso_week_series.index)
 
+
+def get_v3_time_settings(time_grain: str) -> dict[str, object]:
+    if time_grain == "Fortnightly":
+        return {
+            "period_col": "FORTNIGHT",
+            "seasonal_features": [f"BW_{period}" for period in range(2, 27)],
+            "seasonality_label": "fortnight dummies (BW_2...BW_26)",
+            "test_unit_label": "fortnights",
+        }
+    return {
+        "period_col": "ISO_WEEK",
+        "seasonal_features": [f"W_{period}" for period in range(2, 53)],
+        "seasonality_label": "week dummies (W_2...W_52)",
+        "test_unit_label": "weeks",
+    }
+
 def transform_for_mmm(df: pd.DataFrame, weights: list, include_fourier: bool = True) -> pd.DataFrame:
     """
     Apply all V2 transformations in order:
@@ -237,14 +253,18 @@ def transform_for_mmm(df: pd.DataFrame, weights: list, include_fourier: bool = T
     return g
 
 
-def build_mmm_feature_cols(df: pd.DataFrame, include_fourier: bool = True) -> list[str]:
+def build_mmm_feature_cols(
+    df: pd.DataFrame,
+    include_fourier: bool = True,
+    time_grain: str = "Weekly",
+) -> list[str]:
     seasonal = []
     if include_fourier:
         seasonal = [f"sin_{k}" for k in range(1, FOURIER_K + 1)] + \
                    [f"cos_{k}" for k in range(1, FOURIER_K + 1)]
     else:
-        # Drop W_1 as the baseline week to avoid perfect multicollinearity.
-        seasonal = [f"W_{week}" for week in range(2, 53)]
+        # Drop the first period as baseline to avoid perfect multicollinearity.
+        seasonal = get_v3_time_settings(time_grain)["seasonal_features"]
     prescreen = [f"{PRESCREEN_COL}_final"]
     digital   = [f"{c}_final" for c in ADSTOCK_COLS]
     all_feats = seasonal + prescreen + digital
@@ -363,6 +383,229 @@ def run_mmm_for_channel(
         "n_test":     len(test),
         "avg_test_apps": float(np.mean(y_te)) if len(y_te) > 0 else 0,
     }
+
+
+def _r2_score(y: np.ndarray, yh: np.ndarray) -> float:
+    ss_res = np.sum((y - yh) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    return 1 - ss_res / max(ss_tot, 1e-12)
+
+
+def _mae_score(y: np.ndarray, yh: np.ndarray) -> float:
+    return float(np.mean(np.abs(y - yh)))
+
+
+def _mape_score(y: np.ndarray, yh: np.ndarray) -> float:
+    mask = y != 0
+    return float(np.mean(np.abs((y[mask] - yh[mask]) / y[mask])) * 100) if mask.any() else np.nan
+
+
+def _summarize_mmm_fit(frame: pd.DataFrame, split_label: str) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["period_label", "APPLICATIONS", "Predicted", "split"])
+    summary = (
+        frame.groupby("period_label", dropna=False)[["APPLICATIONS", "Predicted"]]
+        .sum()
+        .reset_index()
+    )
+    summary["split"] = split_label
+    return summary
+
+
+def run_mmm_rolling_v3(
+    df: pd.DataFrame,
+    channel: str,
+    weights: list,
+    time_grain: str = "Weekly",
+    train_years: list[int] | None = None,
+    test_years: list[int] | None = None,
+) -> dict | None:
+    """Run V3 using a fixed baseline fit plus rolling 2026 period-by-period prediction."""
+    train_years = TRAIN_YEARS_V3 if train_years is None else train_years
+    test_years = TEST_YEARS_V3 if test_years is None else test_years
+    settings = get_v3_time_settings(time_grain)
+    period_col = settings["period_col"]
+
+    ch_df = df[df["CHANNEL_CD"] == channel].copy()
+    if ch_df.empty or period_col not in ch_df.columns:
+        return None
+
+    ch_df = ch_df.sort_values(["ISO_YEAR", period_col]).reset_index(drop=True)
+    ch_df = transform_for_mmm(ch_df, weights, include_fourier=False)
+    ch_df = ch_df[ch_df["ISO_YEAR"].isin(train_years + test_years)].copy()
+
+    train = ch_df[ch_df["ISO_YEAR"].isin(train_years)].copy()
+    test = ch_df[ch_df["ISO_YEAR"].isin(test_years)].copy()
+    if len(train) < 5 or test.empty:
+        return None
+
+    feat_cols = build_mmm_feature_cols(ch_df, include_fourier=False, time_grain=time_grain)
+    if not feat_cols:
+        return None
+
+    X_train = np.column_stack([np.ones(len(train)), train[feat_cols].fillna(0).values])
+    y_train = train["APPLICATIONS"].fillna(0).values.astype(float)
+    baseline_coefs, baseline_solver = solve_nonnegative_least_squares(X_train, y_train)
+    train["Predicted"] = np.clip(X_train @ baseline_coefs, 0, None)
+
+    train_period_fit = _summarize_mmm_fit(train[["period_label", "APPLICATIONS", "Predicted"]], "Train (baseline)")
+    coef_df = pd.DataFrame({
+        "feature": ["const"] + feat_cols,
+        "coefficient": baseline_coefs,
+    })
+
+    test_keys = (
+        test[["ISO_YEAR", period_col, "period_label"]]
+        .drop_duplicates()
+        .sort_values(["ISO_YEAR", period_col])
+        .reset_index(drop=True)
+    )
+    rolling_frames: list[pd.DataFrame] = []
+    rolling_detail_rows: list[dict[str, object]] = []
+
+    for key in test_keys.itertuples(index=False):
+        year = int(key.ISO_YEAR)
+        period_value = int(getattr(key, period_col))
+        period_label = str(key.period_label)
+
+        prior_test_mask = (
+            (ch_df["ISO_YEAR"].isin(test_years))
+            & (
+                (ch_df["ISO_YEAR"] < year)
+                | ((ch_df["ISO_YEAR"] == year) & (ch_df[period_col] < period_value))
+            )
+        )
+        step_train = ch_df[ch_df["ISO_YEAR"].isin(train_years) | prior_test_mask].copy()
+        period_rows = ch_df[(ch_df["ISO_YEAR"] == year) & (ch_df[period_col] == period_value)].copy()
+        if len(step_train) < 5 or period_rows.empty:
+            continue
+
+        X_step_train = np.column_stack([np.ones(len(step_train)), step_train[feat_cols].fillna(0).values])
+        y_step_train = step_train["APPLICATIONS"].fillna(0).values.astype(float)
+        step_coefs, step_solver = solve_nonnegative_least_squares(X_step_train, y_step_train)
+
+        X_period = np.column_stack([np.ones(len(period_rows)), period_rows[feat_cols].fillna(0).values])
+        period_rows["Predicted"] = np.clip(X_period @ step_coefs, 0, None)
+        rolling_frames.append(period_rows[["period_label", "APPLICATIONS", "Predicted"]].copy())
+
+        rolling_detail_rows.append({
+            "period_label": period_label,
+            "Actual": float(period_rows["APPLICATIONS"].sum()),
+            "Predicted": float(period_rows["Predicted"].sum()),
+            "Train Rows": int(len(step_train)),
+            "Predicted Rows": int(len(period_rows)),
+            "Solver": step_solver,
+        })
+
+    if not rolling_frames:
+        return None
+
+    rolling_raw = pd.concat(rolling_frames, ignore_index=True)
+    rolling_fit = _summarize_mmm_fit(rolling_raw, "Test (rolling)")
+    fitted = pd.concat([train_period_fit, rolling_fit], ignore_index=True)
+
+    rolling_detail = pd.DataFrame(rolling_detail_rows)
+    y_test = rolling_detail["Actual"].to_numpy(dtype=float)
+    yhat_test = rolling_detail["Predicted"].to_numpy(dtype=float)
+    yhat_train = train["Predicted"].to_numpy(dtype=float)
+
+    n_train, p = len(y_train), len(feat_cols)
+    train_r2 = _r2_score(y_train, yhat_train)
+    adj_r2 = 1 - (1 - train_r2) * (n_train - 1) / max(n_train - p - 1, 1)
+
+    return {
+        "channel": channel,
+        "time_grain": time_grain,
+        "fitted": fitted,
+        "coef_df": coef_df,
+        "rolling_detail": rolling_detail,
+        "train_r2": round(train_r2, 4),
+        "adj_r2": round(adj_r2, 4),
+        "test_r2": round(_r2_score(y_test, yhat_test), 4),
+        "train_mape": round(_mape_score(y_train, yhat_train), 2),
+        "test_mape": round(_mape_score(y_test, yhat_test), 2),
+        "train_mae": round(_mae_score(y_train, yhat_train), 1),
+        "test_mae": round(_mae_score(y_test, yhat_test), 1),
+        "n_train": int(len(train)),
+        "n_test": int(len(test)),
+        "solver": baseline_solver,
+        "avg_test_apps": float(np.mean(y_test)) if len(y_test) > 0 else 0,
+    }
+
+
+def render_mmm_rolling_result(result: dict, avg_apps: float) -> None:
+    """Render rolling V3 results with train baseline and expanding-window test prediction."""
+    mae_pct = result["test_mae"] / max(avg_apps, 1) * 100
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Train R²", f"{result['train_r2']:.3f}")
+    c2.metric("Rolling Test R²", f"{result['test_r2']:.3f}")
+    c3.metric("Rolling Test MAPE", f"{result['test_mape']:.2f}%")
+    c4.metric("Rolling Test MAE %", f"{mae_pct:.1f}%")
+    c5.metric("Solver", result["solver"])
+
+    fitted = result["fitted"]
+    fig = go.Figure()
+    for split, color in [("Train (baseline)", "#378ADD"), ("Test (rolling)", "#E24B4A")]:
+        sub = fitted[fitted["split"] == split]
+        fig.add_trace(go.Scatter(
+            x=sub["period_label"],
+            y=sub["APPLICATIONS"],
+            mode="lines+markers",
+            name=f"Actual ({split})",
+            line=dict(color=color, width=1.5),
+            marker=dict(size=4),
+        ))
+        fig.add_trace(go.Scatter(
+            x=sub["period_label"],
+            y=sub["Predicted"],
+            mode="lines",
+            name=f"Predicted ({split})",
+            line=dict(color=color, width=1.5, dash="dash"),
+        ))
+    fig.update_layout(
+        title="Actual vs Predicted — baseline train + rolling 2026 test",
+        height=320,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        coef_sub = result["coef_df"][result["coef_df"]["feature"].str.endswith("_final")].copy()
+        coef_sub = coef_sub.loc[coef_sub["coefficient"] > 0].copy()
+        if not coef_sub.empty:
+            coef_sub["label"] = coef_sub["feature"].str.replace("_final", "", regex=False)
+            fig_coef = px.bar(
+                coef_sub.sort_values("coefficient"),
+                x="coefficient",
+                y="label",
+                orientation="h",
+                title="Baseline tactic coefficients",
+                color_discrete_sequence=["#378ADD"],
+            )
+            fig_coef.update_layout(height=280, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig_coef, use_container_width=True)
+
+    with col_right:
+        size_df = result["rolling_detail"][["period_label", "Train Rows"]].copy()
+        fig_size = px.bar(
+            size_df,
+            x="period_label",
+            y="Train Rows",
+            title="Train set size used for each rolling prediction",
+            color_discrete_sequence=["#185FA5"],
+        )
+        fig_size.update_layout(height=280, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_size, use_container_width=True)
+
+    with st.expander("📋 Rolling prediction detail"):
+        st.dataframe(result["rolling_detail"], use_container_width=True, hide_index=True)
+
+    with st.expander("📋 Baseline coefficient table"):
+        st.dataframe(result["coef_df"], use_container_width=True, hide_index=True)
 
 
 def render_mmm_channel_result(result: dict, avg_apps: float) -> None:
@@ -822,15 +1065,18 @@ def render_tab_mmm_v3():
 |---|---|---|
 | State coverage | 4-state workbook only | all usable states from raw data |
 | Train period | 2024 + 2025 | 2024 + 2025 |
-| Test period | all non-train years | 2026 only |
-| Seasonality control | Fourier pairs | week dummies (W_2...W_52) |
+| Test period | all non-train years | rolling 2026 periods |
+| Seasonality control | Fourier pairs | week/fortnight dummies |
 | Prescreen handling | circular spread | circular spread |
 | Digital tactics | adstock + Hill | adstock + Hill |
 | Optimizer | NNLS | NNLS |
         """)
 
+    time_grain = st.selectbox("Time grain", TIME_GRAINS, key="v3_time_grain")
+    time_settings = get_v3_time_settings(time_grain)
+
     try:
-        base = auto_prepare_v3_dataset()
+        base = auto_prepare_v3_dataset(time_grain=time_grain)
     except Exception as exc:
         st.error(f"Unable to prepare all-state MMM dataset from raw files: {exc}")
         return
@@ -862,7 +1108,7 @@ def render_tab_mmm_v3():
     )
 
     if not eligible_states:
-        st.warning("No states have enough raw weekly data for the V3 train/test design.")
+        st.warning(f"No states have enough raw {time_grain.lower()} data for the V3 train/test design.")
         return
 
     c1, c2, c3 = st.columns([2, 2, 3])
@@ -891,7 +1137,8 @@ def render_tab_mmm_v3():
     state_detail = state_summary.loc[state_summary["STATE_CD"] == state].iloc[0]
     st.info(
         f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · "
-        f"seasonality via week dummies (W_2...W_52) with no Fourier features · "
+        f"seasonality via {time_settings['seasonality_label']} with no Fourier features · "
+        f"rolling 2026 {time_settings['test_unit_label']} (each period learns from all prior 2026 periods) · "
         f"adstock decay = {ADSTOCK_DECAY} · usable states = {len(eligible_states)} · "
         f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])}"
     )
@@ -899,13 +1146,13 @@ def render_tab_mmm_v3():
     for channel in CHANNELS:
         st.subheader(f"{channel} channel")
         with st.spinner(f"Running V3 MMM for {channel}…"):
-            result = run_mmm_for_channel(
+            result = run_mmm_rolling_v3(
                 filtered,
                 channel,
                 weights,
+                time_grain=time_grain,
                 train_years=TRAIN_YEARS_V3,
                 test_years=TEST_YEARS_V3,
-                include_fourier=False,
             )
 
         if result is None:
@@ -913,7 +1160,7 @@ def render_tab_mmm_v3():
             continue
 
         avg_apps = result["avg_test_apps"]
-        render_mmm_channel_result(result, avg_apps)
+        render_mmm_rolling_result(result, avg_apps)
         st.divider()
 
 

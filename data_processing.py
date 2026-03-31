@@ -21,6 +21,7 @@ from utils import (
 ALL_COMBOS_SHEET = "All_Combos"
 NUMERIC_COLUMNS = ["ISO_YEAR", "ISO_WEEK", "CHANNEL_FLAG", *TACTIC_COLUMNS, *OUTCOME_COLUMNS]
 WEEK_DUMMY_COLUMNS = [f"W_{week}" for week in range(1, 53)]
+BIWEEK_DUMMY_COLUMNS = [f"BW_{bw}" for bw in range(1, 27)]
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +179,9 @@ def prepare_raw_mmm_dataset(
     originations_df: pd.DataFrame,
     state: str | None = None,
     product: str | None = None,
+    time_grain: str = "Weekly",
 ) -> pd.DataFrame:
-    """Build a weekly state/channel/product MMM dataset from raw marketing and originations files."""
+    """Build a weekly or fortnight MMM dataset from raw marketing and originations files."""
     ms = marketing_df.copy()
     od = originations_df.copy()
 
@@ -234,6 +236,29 @@ def prepare_raw_mmm_dataset(
     merged["ISO_YEAR"] = pd.to_numeric(merged["ISO_YEAR"], errors="coerce").fillna(0).astype(int)
     merged["ISO_WEEK"] = pd.to_numeric(merged["ISO_WEEK"], errors="coerce").fillna(0).astype(int)
     merged = merged.loc[(merged["ISO_YEAR"] > 0) & (merged["ISO_WEEK"] > 0)].copy()
+
+    if time_grain == "Fortnightly":
+        merged["FORTNIGHT"] = np.minimum(((merged["ISO_WEEK"] - 1) // 2) + 1, 26).astype(int)
+        agg_columns = [*TACTIC_COLUMNS, *OUTCOME_COLUMNS]
+        merged = (
+            merged.groupby(
+                ["ISO_YEAR", "FORTNIGHT", "STATE_CD", "CHANNEL_CD", "PRODUCT_CD"],
+                dropna=False,
+            )[agg_columns]
+            .sum()
+            .reset_index()
+        )
+        fortnight_dummies = pd.get_dummies(merged["FORTNIGHT"], prefix="BW")
+        fortnight_dummies = fortnight_dummies.reindex(columns=BIWEEK_DUMMY_COLUMNS, fill_value=0).astype(int)
+        merged = pd.concat([merged.reset_index(drop=True), fortnight_dummies.reset_index(drop=True)], axis=1)
+        merged["TOTAL_SPEND"] = merged[TACTIC_COLUMNS].sum(axis=1)
+        merged["period_label"] = (
+            merged["ISO_YEAR"].astype(str) + "-BW" + merged["FORTNIGHT"].astype(str).str.zfill(2)
+        )
+        merged = merged.sort_values(
+            ["STATE_CD", "CHANNEL_CD", "PRODUCT_CD", "ISO_YEAR", "FORTNIGHT"]
+        ).reset_index(drop=True)
+        return merged
 
     week_dummies = pd.get_dummies(merged["ISO_WEEK"], prefix="W")
     week_dummies = week_dummies.reindex(columns=WEEK_DUMMY_COLUMNS, fill_value=0).astype(int)
