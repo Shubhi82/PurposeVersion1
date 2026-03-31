@@ -554,7 +554,7 @@ def run_mmm_rolling_v3(
     }
 
 
-def render_mmm_rolling_result(result: dict, avg_apps: float) -> None:
+def render_mmm_rolling_result(result: dict, avg_apps: float, key_prefix: str) -> None:
     """Render rolling V3 results with train baseline and expanding-window test prediction."""
     mae_pct = result["test_mae"] / max(avg_apps, 1) * 100
 
@@ -590,7 +590,7 @@ def render_mmm_rolling_result(result: dict, avg_apps: float) -> None:
         margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation="h", y=-0.3, x=0.5, xanchor="center"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}-actual-vs-predicted")
 
     col_left, col_right = st.columns(2)
 
@@ -608,7 +608,7 @@ def render_mmm_rolling_result(result: dict, avg_apps: float) -> None:
                 color_discrete_sequence=["#378ADD"],
             )
             fig_coef.update_layout(height=280, margin=dict(l=10, r=10, t=40, b=10))
-            st.plotly_chart(fig_coef, use_container_width=True)
+            st.plotly_chart(fig_coef, use_container_width=True, key=f"{key_prefix}-coef-bar")
 
     with col_right:
         size_df = result["rolling_detail"][["period_label", "Train Rows"]].copy()
@@ -620,7 +620,7 @@ def render_mmm_rolling_result(result: dict, avg_apps: float) -> None:
             color_discrete_sequence=["#185FA5"],
         )
         fig_size.update_layout(height=280, margin=dict(l=10, r=10, t=40, b=10))
-        st.plotly_chart(fig_size, use_container_width=True)
+        st.plotly_chart(fig_size, use_container_width=True, key=f"{key_prefix}-train-size")
 
     with st.expander("📋 Rolling prediction detail"):
         st.dataframe(result["rolling_detail"], use_container_width=True, hide_index=True)
@@ -1181,7 +1181,7 @@ def render_tab_mmm_v3():
             continue
 
         avg_apps = result["avg_test_apps"]
-        render_mmm_rolling_result(result, avg_apps)
+        render_mmm_rolling_result(result, avg_apps, key_prefix=f"v3-{time_grain.lower()}-{channel.lower()}")
         st.divider()
 
 
@@ -1330,7 +1330,7 @@ def render_tab_mmm_v4():
             continue
 
         avg_apps = result["avg_test_apps"]
-        render_mmm_rolling_result(result, avg_apps)
+        render_mmm_rolling_result(result, avg_apps, key_prefix=f"v4-{time_grain.lower()}-{channel.lower()}")
         st.divider()
 
 
