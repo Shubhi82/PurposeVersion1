@@ -145,6 +145,15 @@ def heatmap_fig(df, title):
     fig.update_layout(title=title, margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
+
+def render_version_intro(title: str, steps: list[str], note: str | None = None) -> None:
+    st.header(title)
+    if note:
+        st.caption(note)
+    st.markdown("**What This Version Does**")
+    for idx, step in enumerate(steps, start=1):
+        st.write(f"{idx}. {step}")
+
 # ---------------------------------------------------------------------------
 # Cached loaders
 # ---------------------------------------------------------------------------
@@ -433,6 +442,148 @@ def _summarize_mmm_fit(frame: pd.DataFrame, split_label: str) -> pd.DataFrame:
     return summary
 
 
+def _prepare_workbook_period_columns(df: pd.DataFrame, time_grain: str) -> pd.DataFrame:
+    prepared = df.copy()
+    prepared["ISO_YEAR"] = pd.to_numeric(prepared["ISO_YEAR"], errors="coerce").fillna(0).astype(int)
+    prepared["ISO_WEEK"] = pd.to_numeric(prepared["ISO_WEEK"], errors="coerce").fillna(0).astype(int)
+
+    if time_grain in {"Fortnight", "Fortnightly"}:
+        prepared["period_value"] = np.minimum(((prepared["ISO_WEEK"] - 1) // 2) + 1, 26).astype(int)
+        prepared["period_label"] = (
+            prepared["ISO_YEAR"].astype(str) + "-BW" + prepared["period_value"].astype(str).str.zfill(2)
+        )
+    else:
+        prepared["period_value"] = prepared["ISO_WEEK"].astype(int)
+        prepared["period_label"] = (
+            prepared["ISO_YEAR"].astype(str) + "-W" + prepared["period_value"].astype(str).str.zfill(2)
+        )
+    return prepared
+
+
+def run_workbook_rolling_regression(
+    df: pd.DataFrame,
+    channel: str,
+    time_grain: str = "Weekly",
+    train_years: list[int] | None = None,
+    test_years: list[int] | None = None,
+) -> dict | None:
+    """Simple rolling regression using workbook tactics + workbook time dummies."""
+    train_years = TRAIN_YEARS_V3 if train_years is None else train_years
+    test_years = TEST_YEARS_V3 if test_years is None else test_years
+
+    ch_df = df[df["CHANNEL_CD"] == channel].copy()
+    if ch_df.empty:
+        return None
+
+    ch_df = _prepare_workbook_period_columns(ch_df, time_grain)
+    ch_df = ch_df[ch_df["ISO_YEAR"].isin(train_years + test_years)].copy()
+    ch_df = ch_df.sort_values(["ISO_YEAR", "period_value"]).reset_index(drop=True)
+
+    train = ch_df[ch_df["ISO_YEAR"].isin(train_years)].copy()
+    test = ch_df[ch_df["ISO_YEAR"].isin(test_years)].copy()
+    if len(train) < 5 or test.empty:
+        return None
+
+    seasonal_features = list(get_v3_time_settings(time_grain)["seasonal_features"])
+    tactic_features = [
+        col for col in TACTIC_COLUMNS
+        if col in ch_df.columns and ch_df[col].fillna(0).abs().sum() > 0
+    ]
+    features = tactic_features + [col for col in seasonal_features if col in ch_df.columns]
+    if not features:
+        return None
+
+    baseline_model = LinearRegression()
+    baseline_model.fit(train[features].fillna(0.0).values, train["APPLICATIONS"].fillna(0.0).values)
+    train["Predicted"] = np.clip(baseline_model.predict(train[features].fillna(0.0).values), 0, None)
+
+    train_period_fit = _summarize_mmm_fit(train[["period_label", "APPLICATIONS", "Predicted"]], "Train (baseline)")
+    coef_df = pd.DataFrame({
+        "feature": ["Intercept", *features],
+        "coefficient": [float(baseline_model.intercept_), *baseline_model.coef_.astype(float).tolist()],
+    })
+
+    test_keys = (
+        test[["ISO_YEAR", "period_value", "period_label"]]
+        .drop_duplicates()
+        .sort_values(["ISO_YEAR", "period_value"])
+        .reset_index(drop=True)
+    )
+    rolling_frames: list[pd.DataFrame] = []
+    rolling_detail_rows: list[dict[str, object]] = []
+
+    for key in test_keys.itertuples(index=False):
+        year = int(key.ISO_YEAR)
+        period_value = int(key.period_value)
+        period_label = str(key.period_label)
+
+        prior_test_mask = (
+            (ch_df["ISO_YEAR"].isin(test_years))
+            & (
+                (ch_df["ISO_YEAR"] < year)
+                | ((ch_df["ISO_YEAR"] == year) & (ch_df["period_value"] < period_value))
+            )
+        )
+        step_train = ch_df[ch_df["ISO_YEAR"].isin(train_years) | prior_test_mask].copy()
+        period_rows = ch_df[(ch_df["ISO_YEAR"] == year) & (ch_df["period_value"] == period_value)].copy()
+        if len(step_train) < 5 or period_rows.empty:
+            continue
+
+        step_model = LinearRegression()
+        step_model.fit(step_train[features].fillna(0.0).values, step_train["APPLICATIONS"].fillna(0.0).values)
+        period_rows["Predicted"] = np.clip(
+            step_model.predict(period_rows[features].fillna(0.0).values),
+            0,
+            None,
+        )
+        rolling_frames.append(period_rows[["period_label", "APPLICATIONS", "Predicted"]].copy())
+
+        rolling_detail_rows.append({
+            "period_label": period_label,
+            "Actual": float(period_rows["APPLICATIONS"].sum()),
+            "Predicted": float(period_rows["Predicted"].sum()),
+            "Train Rows": int(len(step_train)),
+            "Predicted Rows": int(len(period_rows)),
+            "Solver": "LinearRegression (OLS)",
+        })
+
+    if not rolling_frames:
+        return None
+
+    rolling_raw = pd.concat(rolling_frames, ignore_index=True)
+    rolling_fit = _summarize_mmm_fit(rolling_raw, "Test (rolling)")
+    fitted = pd.concat([train_period_fit, rolling_fit], ignore_index=True)
+
+    rolling_detail = pd.DataFrame(rolling_detail_rows)
+    y_train = train["APPLICATIONS"].to_numpy(dtype=float)
+    yhat_train = train["Predicted"].to_numpy(dtype=float)
+    y_test = rolling_detail["Actual"].to_numpy(dtype=float)
+    yhat_test = rolling_detail["Predicted"].to_numpy(dtype=float)
+
+    n_train, p = len(y_train), len(features)
+    train_r2 = _r2_score(y_train, yhat_train)
+    adj_r2 = 1 - (1 - train_r2) * (n_train - 1) / max(n_train - p - 1, 1)
+
+    return {
+        "channel": channel,
+        "time_grain": time_grain,
+        "fitted": fitted,
+        "coef_df": coef_df,
+        "rolling_detail": rolling_detail,
+        "train_r2": round(train_r2, 4),
+        "adj_r2": round(adj_r2, 4),
+        "test_r2": round(_r2_score(y_test, yhat_test), 4),
+        "train_mape": round(_mape_score(y_train, yhat_train), 2),
+        "test_mape": round(_mape_score(y_test, yhat_test), 2),
+        "train_mae": round(_mae_score(y_train, yhat_train), 1),
+        "test_mae": round(_mae_score(y_test, yhat_test), 1),
+        "n_train": int(len(train)),
+        "n_test": int(len(test)),
+        "solver": "LinearRegression (OLS)",
+        "avg_test_apps": float(np.mean(y_test)) if len(y_test) > 0 else 0,
+    }
+
+
 def run_mmm_rolling_v3(
     df: pd.DataFrame,
     channel: str,
@@ -595,8 +746,10 @@ def render_mmm_rolling_result(result: dict, avg_apps: float, key_prefix: str) ->
     col_left, col_right = st.columns(2)
 
     with col_left:
-        coef_sub = result["coef_df"][result["coef_df"]["feature"].str.endswith("_final")].copy()
-        coef_sub = coef_sub.loc[coef_sub["coefficient"] > 0].copy()
+        coef_sub = result["coef_df"][result["coef_df"]["feature"].isin(TACTIC_COLUMNS)].copy()
+        if coef_sub.empty:
+            coef_sub = result["coef_df"][result["coef_df"]["feature"].str.endswith("_final")].copy()
+        coef_sub = coef_sub.loc[coef_sub["coefficient"] != 0].copy()
         if not coef_sub.empty:
             coef_sub["label"] = coef_sub["feature"].str.replace("_final", "", regex=False)
             fig_coef = px.bar(
@@ -897,23 +1050,24 @@ def render_tab_originations():
 # ---------------------------------------------------------------------------
 
 def render_tab_marketing_analysis():
-    uploaded_file = st.file_uploader("Upload workbook (.xlsx)", type=["xlsx"], key="model_upload")
+    render_version_intro(
+        "Version 1 — Base Regression from Modeling Workbook",
+        [
+            "Uses the default modeling workbook sheet for the selected Weekly or Fortnight view.",
+            "Filters the selected state and optional product.",
+            "Fits separate DIGITAL and PHYSICAL OLS models on the full selected history.",
+        ],
+        note="Simple baseline regression using spend tactics and time dummies.",
+    )
     time_grain    = st.selectbox("Aggregation", TIME_GRAINS)
 
-    if uploaded_file is not None:
-        try:
-            data = cached_load_data(uploaded_file.getvalue(), time_grain=time_grain)
-        except Exception as exc:
-            st.error(f"Unable to load workbook: {exc}")
-            return
-    elif DEFAULT_DATA_PATH.exists():
-        try:
-            data = auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain=time_grain)
-        except Exception as exc:
-            st.error(f"Unable to load default workbook: {exc}")
-            return
-    else:
-        st.info("Upload the consolidated workbook (.xlsx) to begin analysis.")
+    if not DEFAULT_DATA_PATH.exists():
+        st.error("Default modeling workbook was not found.")
+        return
+    try:
+        data = auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain=time_grain)
+    except Exception as exc:
+        st.error(f"Unable to load default workbook: {exc}")
         return
 
     state_options = sorted(data["STATE_CD"].dropna().unique().tolist())
@@ -983,38 +1137,26 @@ def render_tab_marketing_analysis():
 # ---------------------------------------------------------------------------
 
 def render_tab_mmm_v2():
-    st.header("Marketing Analysis V2 — Advanced MMM (11-step pipeline)")
+    render_version_intro(
+        "Version 2 — Advanced MMM from Modeling Workbook",
+        [
+            "Uses the default modeling workbook sheet for the selected Weekly or Fortnight view.",
+            "Applies the advanced MMM logic with Fourier, Prescreen spread, adstock, and Hill saturation.",
+            "Fits separate DIGITAL and PHYSICAL channel models and compares train vs test fit.",
+        ],
+        note="Advanced version for transformed marketing response modeling.",
+    )
 
-    with st.expander("ℹ️ How V2 differs from V1", expanded=False):
-        st.markdown("""
-| | V1 (OLS) | V2 (MMM — this tab) |
-|---|---|---|
-| Seasonality | 52 week dummies | 4 Fourier features (sin/cos) |
-| Prescreen | Raw weekly spend | Circular spread across 5 weeks |
-| Digital tactics | Raw spend | Adstock (0.5 decay) + Hill saturation |
-| Optimizer | OLS (allows negatives) | NNLS (all coefficients ≥ 0) |
-| Diagnostics | MAPE only | R², Adj-R², MAE%, Durbin-Watson |
-| Output | Coefficients | Coefficients + contribution decomp |
-        """)
-
-    # Controls
-    uploaded_file = st.file_uploader("Upload workbook (.xlsx)", type=["xlsx"], key="v2_upload")
+    time_grain = st.selectbox("Aggregation", TIME_GRAINS, key="v2_time_grain")
     c1, c2, c3 = st.columns([2, 2, 3])
 
-    if uploaded_file is not None:
-        try:
-            data = cached_load_data(uploaded_file.getvalue(), time_grain="Weekly")
-        except Exception as exc:
-            st.error(f"Unable to load workbook: {exc}")
-            return
-    elif DEFAULT_DATA_PATH.exists():
-        try:
-            data = auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain="Weekly")
-        except Exception as exc:
-            st.error(f"Unable to load default workbook: {exc}")
-            return
-    else:
-        st.info("Upload the consolidated workbook (.xlsx) to begin analysis.")
+    if not DEFAULT_DATA_PATH.exists():
+        st.error("Default modeling workbook was not found.")
+        return
+    try:
+        data = auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain=time_grain)
+    except Exception as exc:
+        st.error(f"Unable to load default workbook: {exc}")
         return
 
     state_options = sorted(data["STATE_CD"].dropna().unique().tolist())
@@ -1057,7 +1199,7 @@ def render_tab_mmm_v2():
 
     # Pipeline info banner
     st.info(
-        f"**Pipeline:** Train on {TRAIN_YEARS_V2} → Test on remaining weeks  ·  "
+        f"**Pipeline:** workbook sheet = {time_grain} · Train on {TRAIN_YEARS_V2} → Test on remaining periods  ·  "
         f"Adstock decay = {ADSTOCK_DECAY}  ·  Fourier k={FOURIER_K}  ·  "
         f"Weights = {weights}"
     )
@@ -1078,28 +1220,26 @@ def render_tab_mmm_v2():
 
 
 def render_tab_mmm_v3():
-    st.header("Marketing Analysis V3 — All States, No Fourier")
-
-    with st.expander("ℹ️ How V3 differs from V2", expanded=False):
-        st.markdown("""
-| | V2 | V3 |
-|---|---|---|
-| State coverage | 4-state workbook only | all usable states from raw data |
-| Train period | 2024 + 2025 | 2024 + 2025 |
-| Test period | all non-train years | rolling 2026 periods |
-| Seasonality control | Fourier pairs | week/fortnight dummies |
-| Prescreen handling | circular spread | circular spread |
-| Digital tactics | adstock + Hill | adstock + Hill |
-| Optimizer | NNLS | NNLS |
-        """)
+    render_version_intro(
+        "Version 3 — Simple Rolling Regression from Modeling Workbook",
+        [
+            "Uses the default workbook sheet for the selected Weekly or Fortnight view.",
+            "Trains on 2024 and 2025, then rolls forward through 2026 one period at a time.",
+            "Uses simple regression with workbook tactic columns and workbook time dummies only.",
+        ],
+        note="No upload, no Fourier, no lag weights, and no Direct Mail removal in this version.",
+    )
 
     time_grain = st.selectbox("Time grain", TIME_GRAINS, key="v3_time_grain")
     time_settings = get_v3_time_settings(time_grain)
 
+    if not DEFAULT_DATA_PATH.exists():
+        st.error("Default modeling workbook was not found.")
+        return
     try:
-        base = auto_prepare_v3_dataset(time_grain=time_grain)
+        base = auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain=time_grain)
     except Exception as exc:
-        st.error(f"Unable to prepare all-state MMM dataset from raw files: {exc}")
+        st.error(f"Unable to load default workbook: {exc}")
         return
 
     state_summary = (
@@ -1129,48 +1269,37 @@ def render_tab_mmm_v3():
     )
 
     if not eligible_states:
-        st.warning(f"No states have enough raw {time_grain.lower()} data for the V3 train/test design.")
+        st.warning(f"No states have enough {time_grain.lower()} workbook data for the V3 train/test design.")
         return
 
-    c1, c2, c3 = st.columns([2, 2, 3])
+    c1, c2 = st.columns(2)
     with c1:
         state = st.selectbox("State", eligible_states, key="v3_state")
     with c2:
         product = st.selectbox("Product", get_available_products(base, state), key="v3_product")
-    with c3:
-        scheme_label = st.selectbox(
-            "Prescreen spread weights",
-            list(WEIGHT_SCHEMES.keys()),
-            index=0,
-            key="v3_weights",
-            help="Controls how Prescreen spend is distributed across 5 weeks.",
-        )
-
-    weights = WEIGHT_SCHEMES[scheme_label]
     filtered = base[base["STATE_CD"] == state].copy()
     if product != PRODUCT_ALL_LABEL:
         filtered = filtered[filtered["PRODUCT_CD"] == product].copy()
 
     if filtered.empty:
-        st.warning("No raw weekly data for the selected state/product.")
+        st.warning("No workbook data for the selected state/product.")
         return
 
     state_detail = state_summary.loc[state_summary["STATE_CD"] == state].iloc[0]
     st.info(
         f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · "
-        f"seasonality via {time_settings['seasonality_label']} with no Fourier features · "
+        f"seasonality via {time_settings['seasonality_label']} from the workbook · "
         f"rolling 2026 {time_settings['test_unit_label']} (each period learns from all prior 2026 periods) · "
-        f"adstock decay = {ADSTOCK_DECAY} · usable states = {len(eligible_states)} · "
+        f"simple regression only · usable states = {len(eligible_states)} · "
         f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])}"
     )
 
     for channel in CHANNELS:
         st.subheader(f"{channel} channel")
-        with st.spinner(f"Running V3 MMM for {channel}…"):
-            result = run_mmm_rolling_v3(
+        with st.spinner(f"Running V3 regression for {channel}…"):
+            result = run_workbook_rolling_regression(
                 filtered,
                 channel,
-                weights,
                 time_grain=time_grain,
                 train_years=TRAIN_YEARS_V3,
                 test_years=TEST_YEARS_V3,
@@ -1186,34 +1315,27 @@ def render_tab_mmm_v3():
 
 
 def render_tab_mmm_v4():
-    st.header("Marketing Analysis V4 — Rolled-Up Products, Direct Mail Separate")
-
-    with st.expander("ℹ️ How V4 differs from V3", expanded=False):
-        st.markdown("""
-| | V3 | V4 |
-|---|---|---|
-| Product scope | all products in raw data | rolled-up products only |
-| Direct Mail | not modeled separately | excluded from MMM and tracked via `DM Data.csv` |
-| Train period | 2024 + 2025 | 2024 + 2025 |
-| Test period | rolling 2026 periods | rolling 2026 periods |
-| Seasonality control | week/fortnight dummies | week/fortnight dummies |
-| Optimizer | NNLS | NNLS |
-        """)
+    render_version_intro(
+        "Version 4 — Rolled-Up Product Regression from Modeling Workbook",
+        [
+            "Uses the default workbook sheet for the selected Weekly or Fortnight view.",
+            "Keeps only rolled-up products like ILP/FLC, ILP/PDL, LOC/FLC, and PDL/FLC.",
+            "Runs the same simple rolling 2026 regression separately for DIGITAL and PHYSICAL.",
+        ],
+        note="No upload and no Direct Mail summary section in this version.",
+    )
 
     time_grain = st.selectbox("Time grain", TIME_GRAINS, key="v4_time_grain")
     time_settings = get_v3_time_settings(time_grain)
 
-    try:
-        base = auto_prepare_v4_dataset(time_grain=time_grain)
-    except Exception as exc:
-        st.error(f"Unable to prepare V4 dataset: {exc}")
+    if not DEFAULT_DATA_PATH.exists():
+        st.error("Default modeling workbook was not found.")
         return
-
     try:
-        dm_df = auto_load_dm_data()
+        base = filter_rolled_up_products(auto_load_modeling(str(DEFAULT_DATA_PATH), time_grain=time_grain))
     except Exception as exc:
-        dm_df = pd.DataFrame()
-        st.warning(f"Direct Mail file could not be loaded: {exc}")
+        st.error(f"Unable to load default workbook: {exc}")
+        return
 
     state_summary = (
         base.assign(
@@ -1242,24 +1364,14 @@ def render_tab_mmm_v4():
     )
 
     if not eligible_states:
-        st.warning(f"No states have enough raw {time_grain.lower()} rolled-up data for V4.")
+        st.warning(f"No states have enough {time_grain.lower()} rolled-up workbook data for V4.")
         return
 
-    c1, c2, c3 = st.columns([2, 2, 3])
+    c1, c2 = st.columns(2)
     with c1:
         state = st.selectbox("State", eligible_states, key="v4_state")
     with c2:
         product = st.selectbox("Rolled-up product", get_available_rolled_up_products(base, state), key="v4_product")
-    with c3:
-        scheme_label = st.selectbox(
-            "Prescreen spread weights",
-            list(WEIGHT_SCHEMES.keys()),
-            index=0,
-            key="v4_weights",
-            help="Controls how Prescreen spend is distributed across 5 weeks.",
-        )
-
-    weights = WEIGHT_SCHEMES[scheme_label]
     filtered = base[base["STATE_CD"] == state].copy()
     if product != PRODUCT_ALL_LABEL:
         filtered = filtered[filtered["PRODUCT_CD"] == product].copy()
@@ -1269,57 +1381,20 @@ def render_tab_mmm_v4():
         return
 
     state_detail = state_summary.loc[state_summary["STATE_CD"] == state].iloc[0]
-    product_mapping = expand_rollup_product(product) if product != PRODUCT_ALL_LABEL else []
-    mapping_label = ", ".join(product_mapping) if product_mapping else "all available DM offer products"
     st.info(
         f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · "
         f"seasonality via {time_settings['seasonality_label']} · "
         f"rolling 2026 {time_settings['test_unit_label']} · "
-        f"rolled-up products only · Direct Mail excluded from MMM and loaded separately from `{DM_DATA_PATH.name}` · "
-        f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])} · "
-        f"DM product mapping = {mapping_label}"
+        f"rolled-up products only · simple regression only · "
+        f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])}"
     )
-
-    if not dm_df.empty:
-        dm_summary = summarize_dm_data(dm_df, state=state, product=product, time_grain=time_grain)
-        with st.expander("📬 Direct Mail summary (separate input)"):
-            if dm_summary.empty:
-                st.info("No Direct Mail rows matched the current state/product selection.")
-            else:
-                dm_metrics = ["UNIQUE_RESERVATION_CODE_COUNT", "UNIQUE_APPLICANTS", "UNIQUE_APPROVED", "UNIQUE_FUNDED"]
-                dm_totals = dm_summary[dm_metrics].sum()
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("DM Mailers", f"{int(dm_totals['UNIQUE_RESERVATION_CODE_COUNT']):,}")
-                m2.metric("DM Applicants", f"{int(dm_totals['UNIQUE_APPLICANTS']):,}")
-                m3.metric("DM Approved", f"{int(dm_totals['UNIQUE_APPROVED']):,}")
-                m4.metric("DM Funded", f"{int(dm_totals['UNIQUE_FUNDED']):,}")
-                dm_plot = dm_summary.melt(
-                    id_vars=["period_label", "DM_CHANNEL_CD"],
-                    value_vars=["UNIQUE_APPLICANTS", "UNIQUE_APPROVED", "UNIQUE_FUNDED"],
-                    var_name="Metric",
-                    value_name="Count",
-                )
-                fig_dm = px.line(
-                    dm_plot,
-                    x="period_label",
-                    y="Count",
-                    color="Metric",
-                    line_dash="DM_CHANNEL_CD",
-                    markers=True,
-                    title="Direct Mail outcomes over time",
-                    color_discrete_sequence=PALETTE,
-                )
-                fig_dm.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-                st.plotly_chart(fig_dm, use_container_width=True)
-                st.dataframe(dm_summary, use_container_width=True, hide_index=True)
 
     for channel in CHANNELS:
         st.subheader(f"{channel} channel")
-        with st.spinner(f"Running V4 MMM for {channel}…"):
-            result = run_mmm_rolling_v3(
+        with st.spinner(f"Running V4 regression for {channel}…"):
+            result = run_workbook_rolling_regression(
                 filtered,
                 channel,
-                weights,
                 time_grain=time_grain,
                 train_years=TRAIN_YEARS_V3,
                 test_years=TEST_YEARS_V3,

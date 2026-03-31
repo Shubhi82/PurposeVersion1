@@ -64,6 +64,12 @@ def load_modeling_data(source: str | Path | BinaryIO, time_grain: str = "Weekly"
     df["CHANNEL_CD"] = df["CHANNEL_CD"].astype(str).str.strip().str.upper()
     df = df.loc[df["CHANNEL_CD"].isin(CHANNELS)].copy()
 
+    if "TOTAL_SPEND" not in df.columns:
+        available_tactics = [col for col in TACTIC_COLUMNS if col in df.columns]
+        df["TOTAL_SPEND"] = df[available_tactics].sum(axis=1) if available_tactics else 0.0
+    if "time_grain" not in df.columns:
+        df["time_grain"] = str(time_grain).lower()
+
     # Ensure APPROVED and ORIGINATIONS exist (may be absent in older workbooks)
     for col in ["APPROVED", "ORIGINATIONS"]:
         if col not in df.columns:
