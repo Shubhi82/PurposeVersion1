@@ -10,11 +10,14 @@ import pandas as pd
 
 from utils import (
     CHANNELS,
+    DM_DATA_PATH,
     OUTCOME_COLUMNS,
     PRODUCT_ALL_LABEL,
     TACTIC_COLUMNS,
     add_time_columns,
+    expand_rollup_product,
     filter_data,
+    is_rolled_up_product,
 )
 
 
@@ -174,6 +177,109 @@ def load_originations_data(source, fallback_source: str | Path | BinaryIO | None
         return build_originations_fallback(model_df)
 
 
+def load_dm_data(source: str | Path | BinaryIO = DM_DATA_PATH) -> pd.DataFrame:
+    """Load Direct Mail data as a separate input from the core spend/origination files."""
+    if isinstance(source, bytes):
+        source = BytesIO(source)
+    df = pd.read_csv(source)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    rename_map = {
+        "ADDRESS_STATE": "STATE_CD",
+        "OFFER_PRODUCT": "PRODUCT_CD",
+        "OFFER_CHANNEL": "DM_CHANNEL_CD",
+        "EXPECTED_INHOME_DATE": "INHOME_DATE",
+    }
+    df = df.rename(columns={src: dest for src, dest in rename_map.items() if src in df.columns})
+
+    if "INHOME_DATE" in df.columns:
+        df["INHOME_DATE"] = pd.to_datetime(df["INHOME_DATE"], errors="coerce")
+        df["ISO_YEAR"] = df["INHOME_DATE"].dt.isocalendar().year.astype("Int64")
+        df["ISO_WEEK"] = df["INHOME_DATE"].dt.isocalendar().week.astype("Int64")
+
+    if "STATE_CD" in df.columns:
+        df["STATE_CD"] = df["STATE_CD"].astype(str).str.strip().str.upper()
+    if "PRODUCT_CD" in df.columns:
+        df["PRODUCT_CD"] = df["PRODUCT_CD"].astype(str).str.strip()
+    if "DM_CHANNEL_CD" in df.columns:
+        df["DM_CHANNEL_CD"] = df["DM_CHANNEL_CD"].astype(str).str.strip().str.upper()
+
+    numeric_cols = [
+        "UNIQUE_RESERVATION_CODE_COUNT",
+        "UNIQUE_APPLICANTS",
+        "UNIQUE_APPROVED",
+        "UNIQUE_FUNDED",
+        "RESPONSE_RATE_PCT",
+        "APPROVAL_RATE_PCT",
+        "FUND_RATE_PCT",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    return df
+
+
+def filter_rolled_up_products(df: pd.DataFrame, product_col: str = "PRODUCT_CD") -> pd.DataFrame:
+    if product_col not in df.columns:
+        return df.copy()
+    out = df.copy()
+    return out.loc[out[product_col].astype(str).str.strip().apply(is_rolled_up_product)].copy()
+
+
+def exclude_direct_mail_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove Direct Mail rows from marketing spend data when present."""
+    out = df.copy()
+    masks = []
+    for col in ["DETAIL_TACTIC", "H_TACTIC"]:
+        if col in out.columns:
+            masks.append(out[col].astype(str).str.contains("direct mail", case=False, na=False))
+    if not masks:
+        return out
+    dm_mask = masks[0]
+    for mask in masks[1:]:
+        dm_mask = dm_mask | mask
+    return out.loc[~dm_mask].copy()
+
+
+def summarize_dm_data(
+    df: pd.DataFrame,
+    state: str | None = None,
+    product: str | None = None,
+    time_grain: str = "Weekly",
+) -> pd.DataFrame:
+    dm = df.copy()
+    if state:
+        dm = dm.loc[dm["STATE_CD"] == state].copy()
+    if product and product != PRODUCT_ALL_LABEL:
+        mapped_products = expand_rollup_product(product)
+        if mapped_products:
+            dm = dm.loc[dm["PRODUCT_CD"].isin(mapped_products)].copy()
+
+    dm = dm.loc[dm["ISO_YEAR"].notna() & dm["ISO_WEEK"].notna()].copy()
+    dm["ISO_YEAR"] = dm["ISO_YEAR"].astype(int)
+    dm["ISO_WEEK"] = dm["ISO_WEEK"].astype(int)
+    dm = add_time_columns(dm, "Fortnight" if time_grain in {"Fortnight", "Fortnightly"} else "Weekly")
+
+    metrics = [
+        "UNIQUE_RESERVATION_CODE_COUNT",
+        "UNIQUE_APPLICANTS",
+        "UNIQUE_APPROVED",
+        "UNIQUE_FUNDED",
+    ]
+    available = [col for col in metrics if col in dm.columns]
+    if not available:
+        return pd.DataFrame()
+
+    summary = (
+        dm.groupby(["period_label", "DM_CHANNEL_CD"], dropna=False)[available]
+        .sum()
+        .reset_index()
+        .sort_values(["period_label", "DM_CHANNEL_CD"])
+    )
+    return summary
+
+
 def prepare_raw_mmm_dataset(
     marketing_df: pd.DataFrame,
     originations_df: pd.DataFrame,
@@ -237,7 +343,7 @@ def prepare_raw_mmm_dataset(
     merged["ISO_WEEK"] = pd.to_numeric(merged["ISO_WEEK"], errors="coerce").fillna(0).astype(int)
     merged = merged.loc[(merged["ISO_YEAR"] > 0) & (merged["ISO_WEEK"] > 0)].copy()
 
-    if time_grain == "Fortnightly":
+    if time_grain in {"Fortnight", "Fortnightly"}:
         merged["FORTNIGHT"] = np.minimum(((merged["ISO_WEEK"] - 1) // 2) + 1, 26).astype(int)
         agg_columns = [*TACTIC_COLUMNS, *OUTCOME_COLUMNS]
         merged = (

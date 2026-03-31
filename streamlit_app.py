@@ -19,8 +19,11 @@ from data_processing import (
     build_channel_comparison_table,
     build_product_spend_series,
     build_tactic_time_series,
+    exclude_direct_mail_rows,
+    filter_rolled_up_products,
     load_marketing_spend_data,
     load_marketing_spend_raw,
+    load_dm_data,
     load_modeling_data,
     load_originations_data,
     load_originations_raw,
@@ -39,19 +42,23 @@ from data_processing import (
     od_metrics_over_time,
     prepare_modeling_dataset,
     prepare_raw_mmm_dataset,
+    summarize_dm_data,
 )
 from modeling import fit_channel_models
 from utils import (
     CHANNELS,
     DEFAULT_DATA_PATH,
+    DM_DATA_PATH,
     MARKETING_SPEND_PATH,
     ORIGINATIONS_PATH,
     OUTCOME_COLUMNS,
     PRODUCT_ALL_LABEL,
     TACTIC_COLUMNS,
     TIME_GRAINS,
+    expand_rollup_product,
     format_metric,
     get_available_products,
+    get_available_rolled_up_products,
 )
 
 # ---------------------------------------------------------------------------
@@ -164,6 +171,20 @@ def auto_prepare_v3_dataset(time_grain: str = "Weekly") -> pd.DataFrame:
     originations = load_originations_data(ORIGINATIONS_PATH, fallback_source=DEFAULT_DATA_PATH)
     return prepare_raw_mmm_dataset(marketing, originations, time_grain=time_grain)
 
+
+@st.cache_data(show_spinner="Preparing V4 rolled-up dataset…")
+def auto_prepare_v4_dataset(time_grain: str = "Weekly") -> pd.DataFrame:
+    marketing = load_marketing_spend_data(MARKETING_SPEND_PATH, fallback_source=DEFAULT_DATA_PATH)
+    originations = load_originations_data(ORIGINATIONS_PATH, fallback_source=DEFAULT_DATA_PATH)
+    marketing = filter_rolled_up_products(exclude_direct_mail_rows(marketing))
+    originations = filter_rolled_up_products(originations)
+    return prepare_raw_mmm_dataset(marketing, originations, time_grain=time_grain)
+
+
+@st.cache_data(show_spinner="Loading Direct Mail data…")
+def auto_load_dm_data() -> pd.DataFrame:
+    return load_dm_data(DM_DATA_PATH)
+
 # ---------------------------------------------------------------------------
 # V2 MMM transformation helpers
 # ---------------------------------------------------------------------------
@@ -208,7 +229,7 @@ def _fourier_features(iso_week_series: pd.Series, k: int = 2) -> pd.DataFrame:
 
 
 def get_v3_time_settings(time_grain: str) -> dict[str, object]:
-    if time_grain == "Fortnightly":
+    if time_grain in {"Fortnight", "Fortnightly"}:
         return {
             "period_col": "FORTNIGHT",
             "seasonal_features": [f"BW_{period}" for period in range(2, 27)],
@@ -1164,6 +1185,155 @@ def render_tab_mmm_v3():
         st.divider()
 
 
+def render_tab_mmm_v4():
+    st.header("Marketing Analysis V4 — Rolled-Up Products, Direct Mail Separate")
+
+    with st.expander("ℹ️ How V4 differs from V3", expanded=False):
+        st.markdown("""
+| | V3 | V4 |
+|---|---|---|
+| Product scope | all products in raw data | rolled-up products only |
+| Direct Mail | not modeled separately | excluded from MMM and tracked via `DM Data.csv` |
+| Train period | 2024 + 2025 | 2024 + 2025 |
+| Test period | rolling 2026 periods | rolling 2026 periods |
+| Seasonality control | week/fortnight dummies | week/fortnight dummies |
+| Optimizer | NNLS | NNLS |
+        """)
+
+    time_grain = st.selectbox("Time grain", TIME_GRAINS, key="v4_time_grain")
+    time_settings = get_v3_time_settings(time_grain)
+
+    try:
+        base = auto_prepare_v4_dataset(time_grain=time_grain)
+    except Exception as exc:
+        st.error(f"Unable to prepare V4 dataset: {exc}")
+        return
+
+    try:
+        dm_df = auto_load_dm_data()
+    except Exception as exc:
+        dm_df = pd.DataFrame()
+        st.warning(f"Direct Mail file could not be loaded: {exc}")
+
+    state_summary = (
+        base.assign(
+            is_train=base["ISO_YEAR"].isin(TRAIN_YEARS_V3).astype(int),
+            is_test=base["ISO_YEAR"].isin(TEST_YEARS_V3).astype(int),
+        )
+        .groupby("STATE_CD", dropna=False)
+        .agg(
+            spend_total=("TOTAL_SPEND", "sum"),
+            applications_total=("APPLICATIONS", "sum"),
+            train_rows=("is_train", "sum"),
+            test_rows=("is_test", "sum"),
+        )
+        .reset_index()
+    )
+    eligible_states = (
+        state_summary.loc[
+            (state_summary["spend_total"] > 0)
+            & (state_summary["applications_total"] > 0)
+            & (state_summary["train_rows"] > 0)
+            & (state_summary["test_rows"] > 0),
+            "STATE_CD",
+        ]
+        .sort_values()
+        .tolist()
+    )
+
+    if not eligible_states:
+        st.warning(f"No states have enough raw {time_grain.lower()} rolled-up data for V4.")
+        return
+
+    c1, c2, c3 = st.columns([2, 2, 3])
+    with c1:
+        state = st.selectbox("State", eligible_states, key="v4_state")
+    with c2:
+        product = st.selectbox("Rolled-up product", get_available_rolled_up_products(base, state), key="v4_product")
+    with c3:
+        scheme_label = st.selectbox(
+            "Prescreen spread weights",
+            list(WEIGHT_SCHEMES.keys()),
+            index=0,
+            key="v4_weights",
+            help="Controls how Prescreen spend is distributed across 5 weeks.",
+        )
+
+    weights = WEIGHT_SCHEMES[scheme_label]
+    filtered = base[base["STATE_CD"] == state].copy()
+    if product != PRODUCT_ALL_LABEL:
+        filtered = filtered[filtered["PRODUCT_CD"] == product].copy()
+
+    if filtered.empty:
+        st.warning("No rolled-up product data for the selected V4 state/product.")
+        return
+
+    state_detail = state_summary.loc[state_summary["STATE_CD"] == state].iloc[0]
+    product_mapping = expand_rollup_product(product) if product != PRODUCT_ALL_LABEL else []
+    mapping_label = ", ".join(product_mapping) if product_mapping else "all available DM offer products"
+    st.info(
+        f"**Pipeline:** train on {TRAIN_YEARS_V3} · test on {TEST_YEARS_V3} · "
+        f"seasonality via {time_settings['seasonality_label']} · "
+        f"rolling 2026 {time_settings['test_unit_label']} · "
+        f"rolled-up products only · Direct Mail excluded from MMM and loaded separately from `{DM_DATA_PATH.name}` · "
+        f"selected state train rows = {int(state_detail['train_rows'])}, test rows = {int(state_detail['test_rows'])} · "
+        f"DM product mapping = {mapping_label}"
+    )
+
+    if not dm_df.empty:
+        dm_summary = summarize_dm_data(dm_df, state=state, product=product, time_grain=time_grain)
+        with st.expander("📬 Direct Mail summary (separate input)"):
+            if dm_summary.empty:
+                st.info("No Direct Mail rows matched the current state/product selection.")
+            else:
+                dm_metrics = ["UNIQUE_RESERVATION_CODE_COUNT", "UNIQUE_APPLICANTS", "UNIQUE_APPROVED", "UNIQUE_FUNDED"]
+                dm_totals = dm_summary[dm_metrics].sum()
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("DM Mailers", f"{int(dm_totals['UNIQUE_RESERVATION_CODE_COUNT']):,}")
+                m2.metric("DM Applicants", f"{int(dm_totals['UNIQUE_APPLICANTS']):,}")
+                m3.metric("DM Approved", f"{int(dm_totals['UNIQUE_APPROVED']):,}")
+                m4.metric("DM Funded", f"{int(dm_totals['UNIQUE_FUNDED']):,}")
+                dm_plot = dm_summary.melt(
+                    id_vars=["period_label", "DM_CHANNEL_CD"],
+                    value_vars=["UNIQUE_APPLICANTS", "UNIQUE_APPROVED", "UNIQUE_FUNDED"],
+                    var_name="Metric",
+                    value_name="Count",
+                )
+                fig_dm = px.line(
+                    dm_plot,
+                    x="period_label",
+                    y="Count",
+                    color="Metric",
+                    line_dash="DM_CHANNEL_CD",
+                    markers=True,
+                    title="Direct Mail outcomes over time",
+                    color_discrete_sequence=PALETTE,
+                )
+                fig_dm.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+                st.plotly_chart(fig_dm, use_container_width=True)
+                st.dataframe(dm_summary, use_container_width=True, hide_index=True)
+
+    for channel in CHANNELS:
+        st.subheader(f"{channel} channel")
+        with st.spinner(f"Running V4 MMM for {channel}…"):
+            result = run_mmm_rolling_v3(
+                filtered,
+                channel,
+                weights,
+                time_grain=time_grain,
+                train_years=TRAIN_YEARS_V3,
+                test_years=TEST_YEARS_V3,
+            )
+
+        if result is None:
+            st.info(f"Insufficient data for {channel} modeling under the V4 split.")
+            continue
+
+        avg_apps = result["avg_test_apps"]
+        render_mmm_rolling_result(result, avg_apps)
+        st.divider()
+
+
 # ---------------------------------------------------------------------------
 # Main — render all tabs
 # ---------------------------------------------------------------------------
@@ -1177,6 +1347,7 @@ tabs = st.tabs([
     "🔬 Marketing Analysis",
     "🧪 Marketing Analysis V2",
     "🧩 Marketing Analysis V3",
+    "🧱 Marketing Analysis V4",
 ])
 
 with tabs[0]:
@@ -1193,3 +1364,6 @@ with tabs[3]:
 
 with tabs[4]:
     render_tab_mmm_v3()
+
+with tabs[5]:
+    render_tab_mmm_v4()

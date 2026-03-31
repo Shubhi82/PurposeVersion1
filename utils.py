@@ -27,6 +27,12 @@ ORIGINATIONS_CANDIDATES = [
     ROOT / "Originations_Data.xlsx",
     ROOT / "Originations_Data.csv",
 ]
+DM_DATA_CANDIDATES = [
+    ROOT / "DM Data.csv",
+    ROOT / "DM Data .csv",
+    Path.home() / "Downloads" / "DM Data.csv",
+    Path.home() / "Downloads" / "DM Data .csv",
+]
 MARKETING_SPEND_PATH = next(
     (path for path in MARKETING_SPEND_CANDIDATES if path.exists()),
     MARKETING_SPEND_CANDIDATES[0],
@@ -34,6 +40,10 @@ MARKETING_SPEND_PATH = next(
 ORIGINATIONS_PATH = next(
     (path for path in ORIGINATIONS_CANDIDATES if path.exists()),
     ORIGINATIONS_CANDIDATES[0],
+)
+DM_DATA_PATH = next(
+    (path for path in DM_DATA_CANDIDATES if path.exists()),
+    DM_DATA_CANDIDATES[0],
 )
 
 TACTIC_COLUMNS = [
@@ -100,6 +110,29 @@ def get_available_products(df: pd.DataFrame, state: str) -> list[str]:
         .tolist()
     )
     return [PRODUCT_ALL_LABEL, *products]
+
+
+def is_rolled_up_product(product: str | None) -> bool:
+    value = "" if product is None else str(product).strip()
+    return "/" in value
+
+
+def get_available_rolled_up_products(df: pd.DataFrame, state: str) -> list[str]:
+    products = (
+        df.loc[df["STATE_CD"] == state, "PRODUCT_CD"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    rolled_up = sorted(products[products.apply(is_rolled_up_product)].unique().tolist())
+    return [PRODUCT_ALL_LABEL, *rolled_up]
+
+
+def expand_rollup_product(product: str | None) -> list[str]:
+    if not product or product == PRODUCT_ALL_LABEL:
+        return []
+    parts = [part.strip() for part in str(product).split("/") if part.strip()]
+    return parts if parts else [str(product).strip()]
 
 
 def filter_data(
