@@ -719,12 +719,11 @@ def render_mmm_rolling_result(result: dict, avg_apps: float, key_prefix: str) ->
     """Render rolling V3 results with train baseline and expanding-window test prediction."""
     mae_pct = result["test_mae"] / max(avg_apps, 1) * 100
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Train R²", f"{result['train_r2']:.3f}")
     c2.metric("Rolling Test R²", f"{result['test_r2']:.3f}")
     c3.metric("Rolling Test MAPE", f"{result['test_mape']:.2f}%")
     c4.metric("Rolling Test MAE %", f"{mae_pct:.1f}%")
-    c5.metric("Solver", result["solver"])
 
     fitted = result["fitted"]
     fig = go.Figure()
