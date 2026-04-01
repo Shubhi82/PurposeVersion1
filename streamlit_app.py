@@ -17,6 +17,7 @@ except Exception:
 from data_processing import (
     build_application_series,
     build_channel_comparison_table,
+    build_modeling_frame,
     build_product_spend_series,
     build_tactic_time_series,
     exclude_direct_mail_rows,
@@ -42,12 +43,15 @@ from data_processing import (
     od_metrics_over_time,
     prepare_modeling_dataset,
     prepare_raw_mmm_dataset,
+    run_all_configs_for_entity,
     summarize_dm_data,
 )
 from modeling import fit_channel_models
 from utils import (
     CHANNELS,
     DEFAULT_DATA_PATH,
+    DIAGNOSTICS_DIGITAL_PATH,
+    DIAGNOSTICS_PHYSICAL_PATH,
     DM_DATA_PATH,
     MARKETING_SPEND_PATH,
     ORIGINATIONS_PATH,
@@ -174,6 +178,11 @@ def auto_load_modeling(path: str, time_grain: str = "Weekly"):
         if "unexpected keyword argument 'time_grain'" not in str(exc):
             raise
         return load_modeling_data(Path(path))
+
+@st.cache_data(show_spinner="Building modeling frame from raw files…")
+def cached_build_modeling_frame(channel: str) -> pd.DataFrame:
+    return build_modeling_frame(channel)
+
 
 @st.cache_data(show_spinner=False)
 def cached_load_data(source: bytes, time_grain: str = "Weekly"):
@@ -1480,6 +1489,412 @@ def render_tab_mmm_v4():
 
 
 # ---------------------------------------------------------------------------
+# Version 5 — Live Model Diagnostics with Offline Validation
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner="Loading offline diagnostics…")
+def load_offline_diagnostics(channel: str) -> pd.DataFrame:
+    path = DIAGNOSTICS_DIGITAL_PATH if channel == "DIGITAL" else DIAGNOSTICS_PHYSICAL_PATH
+    df = pd.read_excel(str(path), sheet_name="in", engine="openpyxl")
+    for col in ["R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "AIC", "BIC"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def _v5_config_label(row) -> str:
+    return f"{row['model_type']} | {row['dummy_family']}"
+
+
+def render_tab_mmm_v5() -> None:
+    render_version_intro(
+        "Version 5 — Live Regression Pipeline with Offline Validation",
+        [
+            "Rebuilds the complete modeling frame from raw files "
+            "(`Marketing_Spend_Data.csv`, `Originations_Data1_1.xlsx`, `DM_Data.csv`) — "
+            "no pre-built workbook needed.",
+            "The target variable is `NON_DM_APPLICATIONS = max(0, APPLICATIONS − DM_APPLICATIONS)` "
+            "— spend-driven applications only, with Direct Mail responses subtracted.",
+            "Models are run at **state scope** (each state independently) or **division scope** "
+            "(states pooled into 9 US Census Divisions).",
+            "Six configurations per entity: {NNLS, OLS} × {Fortnightly dummies F_1..F_25, "
+            "Weekly dummies W_2..W_52, Fourier terms sin/cos k=1,2}. "
+            "NNLS/f_dummy and NNLS/weekly use MinMax scaler; fourier uses Standard scaler.",
+            "Train: 2024 + 2025 data (104 rows per state). "
+            "Test: first 8 weeks of 2026 (8 rows per state, 32 per 4-state division).",
+            "**Validation tab** lets you compare live results to the pre-computed "
+            "`consolidated_model_diagnostics_*.xlsx` files — "
+            "R², AdjR², AIC, BIC, and Test_R² should match exactly.",
+        ],
+        note=(
+            "Sweepstakes is excluded from all models. "
+            "DM split: ONLINE channel = DIGITAL DM; OMNI + STORE = PHYSICAL DM. "
+            "Scaler is fit on training data only and applied to test."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Filter row — channel / scope / entity / run button
+    # ------------------------------------------------------------------
+    c1, c2, c3, c4 = st.columns([1, 1, 2, 1])
+    with c1:
+        v5_channel = st.selectbox("Channel", ["DIGITAL", "PHYSICAL"], key="v5_channel")
+    with c2:
+        v5_scope = st.selectbox("Scope", ["state", "division"], key="v5_scope")
+
+    # Load frame to get entity list (cached)
+    from utils import MARKETING_SPEND_PATH as _msp, DM_DATA_PATH as _dmp, ORIGINATIONS_V5_PATH as _op
+    missing_files = []
+    if not _msp.exists():
+        missing_files.append(str(_msp.name))
+    if not _dmp.exists():
+        missing_files.append(str(_dmp.name))
+    if not _op.exists():
+        missing_files.append(str(_op.name))
+    if missing_files:
+        st.error(f"Missing raw data files: {', '.join(missing_files)}. Please add them to the app directory.")
+        return
+
+    try:
+        frame_df = cached_build_modeling_frame(v5_channel)
+    except Exception as exc:
+        st.error(f"Failed to build modeling frame: {exc}")
+        return
+
+    if v5_scope == "state":
+        entity_list = sorted(frame_df["STATE_CD"].dropna().unique().tolist())
+    else:
+        entity_list = sorted(frame_df["Division"].dropna().unique().tolist())
+
+    with c3:
+        v5_entity = st.selectbox("Entity", entity_list, key="v5_entity")
+    with c4:
+        st.write("")  # spacer to align button
+        v5_run = st.button("▶ Run All 6 Configurations", key="v5_run")
+
+    cache_key = (v5_channel, v5_scope, v5_entity)
+    if v5_run:
+        with st.spinner(f"Running all 6 configs for {v5_entity} ({v5_channel})…"):
+            diag_df = run_all_configs_for_entity(frame_df, v5_scope, v5_entity, v5_channel)
+        if "v5_results" not in st.session_state:
+            st.session_state["v5_results"] = {}
+        st.session_state["v5_results"][cache_key] = diag_df
+
+    results: pd.DataFrame | None = (
+        st.session_state.get("v5_results", {}).get(cache_key)
+    )
+
+    if results is None or results.empty:
+        st.info("Select channel, scope, and entity, then click **▶ Run All 6 Configurations** to run the pipeline.")
+        return
+
+    # Separate display columns from _result column
+    display_cols = [
+        "model_type", "dummy_family", "scaler_type", "train_rows", "test_rows",
+        "R2", "AdjR2", "MAPE", "Test_R2", "AIC", "BIC",
+    ]
+    disp_df = results[display_cols].copy()
+
+    # Compute best config
+    valid = results[results["Test_R2"] > 0].copy()
+    best_idx = None
+    if not valid.empty:
+        valid["_score"] = (
+            valid["AdjR2"].rank(ascending=False)
+            + valid["MAPE"].rank(ascending=True)
+            + valid["AIC"].rank(ascending=True)
+        )
+        best_idx = int(valid["_score"].idxmin())
+
+    config_labels = [_v5_config_label(results.iloc[i]) for i in range(len(results))]
+
+    # ------------------------------------------------------------------
+    # Sub-tabs
+    # ------------------------------------------------------------------
+    sub_tabs = st.tabs(["📊 Model Comparison", "📈 Actual vs Predicted", "🔍 Coefficient Explorer", "✅ Validate vs Offline"])
+
+    # ---- Sub-tab 1: Model Comparison ----------------------------------
+    with sub_tabs[0]:
+        st.subheader("All 6 Configurations")
+
+        label_col = disp_df.copy()
+        label_col.insert(0, "Config", config_labels)
+        if best_idx is not None:
+            label_col["Best"] = ""
+            label_col.at[best_idx, "Best"] = "⭐ Best"
+
+        st.dataframe(
+            label_col,
+            use_container_width=True,
+            column_config={
+                "R2": st.column_config.ProgressColumn("R²", min_value=0, max_value=1, format="%.4f"),
+                "AdjR2": st.column_config.ProgressColumn("Adj R²", min_value=0, max_value=1, format="%.4f"),
+                "Test_R2": st.column_config.ProgressColumn("Test R²", min_value=0, max_value=1, format="%.4f"),
+                "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f%%"),
+                "AIC": st.column_config.NumberColumn("AIC", format="%.2f"),
+                "BIC": st.column_config.NumberColumn("BIC", format="%.2f"),
+            },
+            hide_index=True,
+        )
+
+        # Metric cards for best config
+        if best_idx is not None:
+            best = results.iloc[best_idx]
+            st.markdown("**Best Configuration**")
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Model Type", best["model_type"])
+            mc2.metric("Dummy Family", best["dummy_family"])
+            mc3.metric("Adj R²", f"{best['AdjR2']:.4f}")
+            mc4.metric("Test R²", f"{best['Test_R2']:.4f}")
+
+        # Grouped bar chart: AdjR2 + MAPE
+        fig_cmp = go.Figure()
+        fig_cmp.add_trace(go.Bar(
+            name="Adj R²",
+            x=config_labels,
+            y=results["AdjR2"].tolist(),
+            yaxis="y",
+            marker_color="#4C78A8",
+        ))
+        fig_cmp.add_trace(go.Bar(
+            name="MAPE (%)",
+            x=config_labels,
+            y=results["MAPE"].tolist(),
+            yaxis="y2",
+            marker_color="#F58518",
+        ))
+        fig_cmp.update_layout(
+            title="Adj R² vs MAPE by Configuration",
+            yaxis=dict(title="Adj R²", range=[0, 1]),
+            yaxis2=dict(title="MAPE (%)", overlaying="y", side="right"),
+            barmode="group",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=400,
+        )
+        st.plotly_chart(fig_cmp, use_container_width=True, key="v5_cmp_chart")
+
+    # ---- Sub-tab 2: Actual vs Predicted -------------------------------
+    with sub_tabs[1]:
+        sel_label_2 = st.selectbox(
+            "Configuration", config_labels, key="v5_sel_config_2"
+        )
+        sel_idx_2 = config_labels.index(sel_label_2)
+        res2 = results.iloc[sel_idx_2]["_result"]
+
+        # Build period labels
+        train_periods = res2["train_periods"]
+        test_periods = res2["test_periods"]
+        train_labels = [f"{int(r[0])}-W{int(r[1]):02d}" for r in train_periods]
+        test_labels = [f"{int(r[0])}-W{int(r[1]):02d}" for r in test_periods]
+        all_labels = train_labels + test_labels
+        all_actual = np.concatenate([res2["y_train_actual"], res2["y_test_actual"]])
+        all_pred = np.concatenate([res2["y_train_pred"], res2["y_test_pred"]])
+        n_train = len(train_labels)
+
+        # Actual vs Predicted chart
+        fig_avp = go.Figure()
+        fig_avp.add_trace(go.Scatter(
+            x=train_labels, y=res2["y_train_actual"].tolist(),
+            mode="lines", name="Actual (Train)", line=dict(color="#4C78A8", width=2),
+        ))
+        fig_avp.add_trace(go.Scatter(
+            x=train_labels, y=res2["y_train_pred"].tolist(),
+            mode="lines", name="Predicted (Train)", line=dict(color="#4C78A8", width=2, dash="dash"),
+        ))
+        fig_avp.add_trace(go.Scatter(
+            x=test_labels, y=res2["y_test_actual"].tolist(),
+            mode="lines", name="Actual (Test)", line=dict(color="#F58518", width=2),
+        ))
+        fig_avp.add_trace(go.Scatter(
+            x=test_labels, y=res2["y_test_pred"].tolist(),
+            mode="lines", name="Predicted (Test)", line=dict(color="#F58518", width=2, dash="dash"),
+        ))
+        if train_labels:
+            fig_avp.add_vline(
+                x=train_labels[-1], line_dash="dot", line_color="gray",
+                annotation_text="Train | Test", annotation_position="top right",
+            )
+        fig_avp.update_layout(
+            title=f"Actual vs Predicted — {sel_label_2}",
+            xaxis_title="Period", yaxis_title="NON_DM_APPLICATIONS",
+            height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig_avp, use_container_width=True, key="v5_avp_chart")
+
+        # Residuals chart
+        residuals = all_actual - all_pred
+        colors = ["#E45756" if r < 0 else "#4C78A8" for r in residuals]
+        fig_res = go.Figure(go.Bar(x=all_labels, y=residuals.tolist(), marker_color=colors))
+        fig_res.add_hline(y=0, line_color="black", line_width=1)
+        fig_res.update_layout(
+            title="Residuals (Actual − Predicted)", xaxis_title="Period",
+            yaxis_title="Residual", height=300,
+        )
+        st.plotly_chart(fig_res, use_container_width=True, key="v5_res_chart")
+
+        # Metrics
+        from sklearn.metrics import r2_score as _r2, mean_absolute_error as _mae
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Train R²", f"{results.iloc[sel_idx_2]['R2']:.4f}")
+        m2.metric("Train MAE", f"{results.iloc[sel_idx_2]['MAE']:.2f}")
+        m3.metric("Train MAPE", f"{results.iloc[sel_idx_2]['MAPE']:.2f}%")
+        m4.metric("Test R²", f"{results.iloc[sel_idx_2]['Test_R2']:.4f}")
+        te_actual = res2["y_test_actual"]
+        te_pred = res2["y_test_pred"]
+        if len(te_actual) > 0:
+            test_mae = float(_mae(te_actual, te_pred))
+            te_mask = te_actual != 0
+            test_mape = (
+                float(np.mean(np.abs((te_actual[te_mask] - te_pred[te_mask]) / te_actual[te_mask])) * 100)
+                if te_mask.any() else float("nan")
+            )
+        else:
+            test_mae = float("nan")
+            test_mape = float("nan")
+        m5.metric("Test MAE", f"{test_mae:.2f}" if not np.isnan(test_mae) else "N/A")
+        m6.metric("Test MAPE", f"{test_mape:.2f}%" if not np.isnan(test_mape) else "N/A")
+
+    # ---- Sub-tab 3: Coefficient Explorer ------------------------------
+    with sub_tabs[2]:
+        sel_label_3 = st.selectbox(
+            "Configuration", config_labels, key="v5_sel_config_3"
+        )
+        sel_idx_3 = config_labels.index(sel_label_3)
+        res3 = results.iloc[sel_idx_3]["_result"]
+        feats = res3["features"]
+        coefs = res3["coefs"]
+
+        from data_processing import TACTIC_COLS_V5 as _tactics
+        feat_types = ["tactic" if f in _tactics else "seasonal" for f in feats]
+        coef_colors = ["#4C78A8" if t == "tactic" else "#72B7B2" for t in feat_types]
+
+        sorted_pairs = sorted(zip(feats, coefs, coef_colors), key=lambda x: abs(x[1]), reverse=True)
+        s_feats, s_coefs, s_colors = zip(*sorted_pairs) if sorted_pairs else ([], [], [])
+
+        fig_coef = go.Figure(go.Bar(
+            x=list(s_coefs),
+            y=list(s_feats),
+            orientation="h",
+            marker_color=list(s_colors),
+        ))
+        fig_coef.update_layout(
+            title=f"Coefficients — {sel_label_3}",
+            xaxis_title="Coefficient Value",
+            yaxis_title="Feature",
+            height=max(400, len(feats) * 22),
+            yaxis=dict(autorange="reversed"),
+        )
+        st.plotly_chart(fig_coef, use_container_width=True, key="v5_coef_chart")
+
+        coef_table = pd.DataFrame({
+            "Feature": feats,
+            "Coefficient": [round(float(c), 6) for c in coefs],
+            "Type": feat_types,
+        })
+        st.dataframe(coef_table, use_container_width=True, hide_index=True)
+
+        model_type_3 = results.iloc[sel_idx_3]["model_type"]
+        if model_type_3 == "NNLS":
+            st.caption(
+                "For NNLS models, coefficients are constrained to be non-negative (no suppression effects). "
+                "Each coefficient represents the change in NON_DM_APPLICATIONS per unit change in the scaled predictor."
+            )
+        else:
+            st.caption(
+                "For OLS models, coefficients may be negative. "
+                "Each coefficient represents the change in NON_DM_APPLICATIONS per unit change in the scaled predictor."
+            )
+
+    # ---- Sub-tab 4: Validate vs Offline --------------------------------
+    with sub_tabs[3]:
+        diag_path = DIAGNOSTICS_DIGITAL_PATH if v5_channel == "DIGITAL" else DIAGNOSTICS_PHYSICAL_PATH
+        if not diag_path.exists():
+            st.warning(
+                "Offline diagnostics file not found. Place "
+                "consolidated_model_diagnostics_digital.xlsx / "
+                "consolidated_model_diagnostics_physical.xlsx in the app directory to enable validation."
+            )
+        else:
+            try:
+                offline_df = load_offline_diagnostics(v5_channel)
+            except Exception as exc:
+                st.error(f"Failed to load offline diagnostics: {exc}")
+                return
+
+            metric_cols = ["R2", "AdjR2", "Test_R2", "AIC", "BIC"]
+            match_count = 0
+            comparison_rows = []
+
+            for _, live_row in results.iterrows():
+                mt = live_row["model_type"]
+                df_fam = live_row["dummy_family"]
+                ent = live_row["entity"]
+
+                # Match in offline file
+                mask = (
+                    (offline_df.get("entity", pd.Series(dtype=str)) == ent)
+                    & (offline_df.get("model_type", pd.Series(dtype=str)) == mt)
+                    & (offline_df.get("dummy_family", pd.Series(dtype=str)) == df_fam)
+                )
+                matched = offline_df[mask]
+
+                config = _v5_config_label(live_row)
+                row_data: dict = {"Config": config}
+                all_match = True
+                for m in metric_cols:
+                    live_val = live_row.get(m, np.nan)
+                    if not matched.empty and m in matched.columns:
+                        off_val = float(matched.iloc[0][m])
+                    else:
+                        off_val = np.nan
+                    diff = abs(live_val - off_val) if not (np.isnan(live_val) or np.isnan(off_val)) else np.nan
+                    row_data[f"{m}_live"] = round(float(live_val), 6) if not np.isnan(live_val) else np.nan
+                    row_data[f"{m}_offline"] = round(float(off_val), 6) if not np.isnan(off_val) else np.nan
+                    row_data[f"{m}_diff"] = round(float(diff), 6) if diff is not None and not np.isnan(diff) else np.nan
+                    if diff is None or np.isnan(diff) or diff >= 0.01:
+                        all_match = False
+                if all_match:
+                    match_count += 1
+                comparison_rows.append(row_data)
+
+            cmp_df = pd.DataFrame(comparison_rows)
+
+            # Summary message
+            total = len(results)
+            if match_count == total:
+                st.success(f"✅ {match_count} of {total} configurations matched within tolerance (|diff| < 0.01).")
+            else:
+                st.warning(
+                    f"⚠ {total - match_count} configuration(s) differ — check data versions. "
+                    f"{match_count} of {total} matched within tolerance."
+                )
+
+            # Side-by-side comparison
+            st.subheader("Live vs Offline Diagnostics")
+            for m in metric_cols:
+                with st.expander(f"**{m}** — live / offline / diff", expanded=(m in ["R2", "Test_R2"])):
+                    sub = cmp_df[["Config", f"{m}_live", f"{m}_offline", f"{m}_diff"]].copy()
+                    sub.columns = ["Config", "Live", "Offline", "Diff"]
+
+                    def _color_diff(val):
+                        if val is None or (isinstance(val, float) and np.isnan(val)):
+                            return "color: gray"
+                        if abs(val) < 0.001:
+                            return "color: green"
+                        if abs(val) < 0.01:
+                            return "color: orange"
+                        return "color: red"
+
+                    styled = sub.style.applymap(_color_diff, subset=["Diff"])
+                    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            st.caption(
+                "R², AdjR², AIC, BIC, and Test_R² are expected to match exactly. "
+                "MAE/MAPE/RMSE may differ slightly due to how residuals are computed in the offline notebook."
+            )
+
+
+# ---------------------------------------------------------------------------
 # Main — render all tabs
 # ---------------------------------------------------------------------------
 
@@ -1493,6 +1908,7 @@ tabs = st.tabs([
     "🧪 Marketing Analysis V2",
     "🧩 Marketing Analysis V3",
     "🧱 Marketing Analysis V4",
+    "🔬 Marketing Analysis V5",
 ])
 
 with tabs[0]:
@@ -1512,3 +1928,6 @@ with tabs[4]:
 
 with tabs[5]:
     render_tab_mmm_v4()
+
+with tabs[6]:
+    render_tab_mmm_v5()

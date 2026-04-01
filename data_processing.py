@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
@@ -11,6 +12,8 @@ import pandas as pd
 from utils import (
     CHANNELS,
     DM_DATA_PATH,
+    MARKETING_SPEND_PATH,
+    ORIGINATIONS_V5_PATH,
     OUTCOME_COLUMNS,
     PRODUCT_ALL_LABEL,
     TACTIC_COLUMNS,
@@ -664,3 +667,302 @@ def prepare_modeling_dataset(
     return pd.concat(
         [modeling_frame.reset_index(drop=True), time_dummies.reset_index(drop=True)], axis=1
     )
+
+
+# ---------------------------------------------------------------------------
+# Version 5 — Live Regression Pipeline
+# ---------------------------------------------------------------------------
+
+TACTIC_COLS_V5 = ["DSP", "LeadGen", "Paid Search", "Paid Social", "Prescreen", "Referrals"]
+
+STATE_TO_DIVISION = {
+    "CT": "New England", "ME": "New England", "MA": "New England", "NH": "New England",
+    "RI": "New England", "VT": "New England",
+    "NJ": "Middle Atlantic", "NY": "Middle Atlantic", "PA": "Middle Atlantic",
+    "IL": "East North Central", "IN": "East North Central", "MI": "East North Central",
+    "OH": "East North Central", "WI": "East North Central",
+    "IA": "West North Central", "KS": "West North Central", "MN": "West North Central",
+    "MO": "West North Central", "NE": "West North Central", "ND": "West North Central",
+    "SD": "West North Central",
+    "DE": "South Atlantic", "FL": "South Atlantic", "GA": "South Atlantic",
+    "MD": "South Atlantic", "NC": "South Atlantic", "SC": "South Atlantic",
+    "VA": "South Atlantic", "WV": "South Atlantic", "DC": "South Atlantic",
+    "AL": "East South Central", "KY": "East South Central", "MS": "East South Central",
+    "TN": "East South Central",
+    "AR": "West South Central", "LA": "West South Central", "OK": "West South Central",
+    "TX": "West South Central",
+    "AZ": "Mountain", "CO": "Mountain", "ID": "Mountain", "MT": "Mountain",
+    "NV": "Mountain", "NM": "Mountain", "UT": "Mountain", "WY": "Mountain",
+    "AK": "Pacific", "CA": "Pacific", "HI": "Pacific", "OR": "Pacific", "WA": "Pacific",
+}
+
+DUMMY_FAMILIES_V5 = {
+    "f_dummy": {
+        "features": lambda: [f"F_{i}" for i in range(1, 26)],
+        "scaler": "minmax",
+    },
+    "weekly": {
+        "features": lambda: [f"W_{i}" for i in range(2, 53)],
+        "scaler": "minmax",
+    },
+    "fourier": {
+        "features": lambda: ["sin_1", "cos_1", "sin_2", "cos_2"],
+        "scaler": "standard",
+    },
+}
+
+
+def build_modeling_frame(channel: str) -> pd.DataFrame:
+    """
+    Build weekly modeling frame for DIGITAL or PHYSICAL channel.
+    Replicates notebook 00 exactly.
+    """
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler  # noqa: F401 (ensure available)
+
+    ms = pd.read_csv(str(MARKETING_SPEND_PATH)).drop_duplicates()
+    dm = pd.read_csv(str(DM_DATA_PATH)).drop_duplicates()
+    orig = pd.read_excel(str(ORIGINATIONS_V5_PATH))
+
+    # Date parsing and ISO week assignment
+    ms["BUSINESS_DATE"] = pd.to_datetime(ms["BUSINESS_DATE"])
+    orig["APPLICATION_DT"] = pd.to_datetime(orig["APPLICATION_DT"])
+    dm_date = pd.to_datetime(dm["EXPECTED_INHOME_DATE"])
+    for df_, col in [(ms, "BUSINESS_DATE"), (orig, "APPLICATION_DT")]:
+        df_["ISO_YEAR"] = df_[col].dt.isocalendar().year
+        df_["ISO_WEEK"] = df_[col].dt.isocalendar().week
+    dm["ISO_YEAR"] = dm_date.dt.isocalendar().year
+    dm["ISO_WEEK"] = dm_date.dt.isocalendar().week
+
+    # Marketing spend: pivot to wide (one column per tactic)
+    ms_w = (
+        ms.groupby(["ISO_YEAR", "ISO_WEEK", "DETAIL_TACTIC", "STATE_CD"])["TOTAL_COST"]
+        .sum()
+        .reset_index()
+    )
+    ms_wide = ms_w.pivot_table(
+        index=["ISO_YEAR", "ISO_WEEK", "STATE_CD"],
+        columns="DETAIL_TACTIC",
+        values="TOTAL_COST",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    ms_wide.columns.name = None
+
+    # Originations: aggregate by channel
+    orig_clean = orig.drop(
+        columns=[c for c in ["H_TACTIC", "ORIGINATION_DT", "DETAIL_TACTIC", "PRODUCT_CODE"] if c in orig.columns]
+    )
+    od_w = (
+        orig_clean.groupby(["ISO_YEAR", "ISO_WEEK", "STATE_CD", "CHANNEL_CD"])
+        .agg({"APPLICATIONS": "sum"})
+        .reset_index()
+    )
+
+    # Direct mail: split DIGITAL (ONLINE) vs PHYSICAL (OMNI + STORE)
+    dm_clean = dm[["ADDRESS_STATE", "OFFER_CHANNEL", "UNIQUE_APPLICANTS"]].copy()
+    dm_clean["ISO_YEAR"] = dm_date.dt.isocalendar().year
+    dm_clean["ISO_WEEK"] = dm_date.dt.isocalendar().week
+    dm_clean = dm_clean.rename(columns={
+        "ADDRESS_STATE": "STATE_CD",
+        "UNIQUE_APPLICANTS": "DM_APPLICATIONS",
+        "OFFER_CHANNEL": "DM_CHANNEL",
+    })
+    dm_w = (
+        dm_clean.groupby(["ISO_YEAR", "ISO_WEEK", "STATE_CD", "DM_CHANNEL"])
+        .agg({"DM_APPLICATIONS": "sum"})
+        .reset_index()
+    )
+
+    if channel == "DIGITAL":
+        dm_ch = dm_w[dm_w["DM_CHANNEL"] == "ONLINE"]
+    else:
+        dm_ch = dm_w[dm_w["DM_CHANNEL"] != "ONLINE"]
+    dm_ch = (
+        dm_ch.groupby(["ISO_YEAR", "ISO_WEEK", "STATE_CD"])
+        .agg({"DM_APPLICATIONS": "sum"})
+        .reset_index()
+    )
+
+    # Filter originations to channel
+    od_ch = od_w[od_w["CHANNEL_CD"] == channel].copy()
+
+    # Merge originations + DM, compute NON_DM_APPLICATIONS
+    merged = pd.merge(od_ch, dm_ch, on=["ISO_YEAR", "ISO_WEEK", "STATE_CD"], how="left")
+    merged["NON_DM_APPLICATIONS"] = np.maximum(
+        0, merged["APPLICATIONS"] - merged["DM_APPLICATIONS"].fillna(0)
+    )
+
+    # Final merge with spend
+    df = pd.merge(
+        ms_wide,
+        merged[["ISO_YEAR", "ISO_WEEK", "STATE_CD", "APPLICATIONS", "NON_DM_APPLICATIONS"]],
+        on=["ISO_YEAR", "ISO_WEEK", "STATE_CD"],
+        how="inner",
+    ).fillna(0)
+
+    # Seasonality: fortnightly dummies F_0..F_25
+    f_dummies = pd.get_dummies((df["ISO_WEEK"] - 1) // 2, prefix="F", dtype=int)
+    df = pd.concat([df, f_dummies], axis=1)
+    for i in range(26):
+        if f"F_{i}" not in df.columns:
+            df[f"F_{i}"] = 0
+
+    # Seasonality: weekly dummies W_1..W_52
+    w_dummies = pd.get_dummies(df["ISO_WEEK"], prefix="W", dtype=int)
+    df = pd.concat([df, w_dummies], axis=1)
+    for i in range(1, 53):
+        if f"W_{i}" not in df.columns:
+            df[f"W_{i}"] = 0
+
+    # Seasonality: Fourier terms
+    P = 52.0
+    for k in [1, 2]:
+        df[f"sin_{k}"] = np.sin(2 * np.pi * k * df["ISO_WEEK"] / P)
+        df[f"cos_{k}"] = np.cos(2 * np.pi * k * df["ISO_WEEK"] / P)
+
+    df["Division"] = df["STATE_CD"].map(STATE_TO_DIVISION)
+    return df
+
+
+def fit_model_config(
+    entity_df: pd.DataFrame,
+    channel: str,
+    model_type: str,
+    dummy_family: str,
+    train_years: list = None,
+    n_test_weeks: int = 8,
+) -> dict | None:
+    """
+    Fit one model configuration exactly matching the offline notebook pipeline.
+    Returns a diagnostics dict or None if insufficient data.
+    """
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+    from scipy.optimize import nnls
+
+    if train_years is None:
+        train_years = [2024, 2025]
+
+    tactics = TACTIC_COLS_V5
+    family = DUMMY_FAMILIES_V5[dummy_family]
+    seasonal = family["features"]()
+    scaler_type = family["scaler"]
+    features = [f for f in tactics + seasonal if f in entity_df.columns]
+    if not features:
+        return None
+
+    train = entity_df[entity_df["ISO_YEAR"].isin(train_years)].copy()
+    next_years = sorted([y for y in entity_df["ISO_YEAR"].unique() if y not in train_years])
+    if not next_years:
+        return None
+    next_year = next_years[0]
+    test_all = entity_df[entity_df["ISO_YEAR"] == next_year].copy().sort_values(["ISO_YEAR", "ISO_WEEK"])
+    test = test_all[test_all["ISO_WEEK"] <= n_test_weeks]
+
+    if len(train) < 10 or len(test) == 0:
+        return None
+
+    X_tr = train[features].values.astype(float)
+    y_tr = train["NON_DM_APPLICATIONS"].values.astype(float)
+    X_te = test[features].values.astype(float)
+    y_te = test["NON_DM_APPLICATIONS"].values.astype(float)
+
+    scaler = MinMaxScaler() if scaler_type == "minmax" else StandardScaler()
+    X_tr_s = scaler.fit_transform(X_tr)
+    X_te_s = scaler.transform(X_te)
+
+    if model_type == "NNLS":
+        coefs, _ = nnls(X_tr_s, y_tr)
+        yhat_tr = X_tr_s @ coefs
+        yhat_te = X_te_s @ coefs
+    else:
+        lr = LinearRegression(fit_intercept=False)
+        lr.fit(X_tr_s, y_tr)
+        yhat_tr = lr.predict(X_tr_s)
+        yhat_te = lr.predict(X_te_s)
+        coefs = lr.coef_
+
+    n, p = len(y_tr), len(features)
+    r2 = float(r2_score(y_tr, yhat_tr))
+    adj_r2 = 1 - (1 - r2) * (n - 1) / max(n - p - 1, 1)
+    mae = float(mean_absolute_error(y_tr, yhat_tr))
+    mask = y_tr != 0
+    mape = float(np.mean(np.abs((y_tr[mask] - yhat_tr[mask]) / y_tr[mask])) * 100) if mask.any() else np.nan
+    rmse = float(np.sqrt(mean_squared_error(y_tr, yhat_tr)))
+    test_r2 = float(r2_score(y_te, yhat_te)) if len(y_te) > 0 else np.nan
+    sse = float(np.sum((y_tr - yhat_tr) ** 2))
+    aic = n * np.log(sse / n) + 2 * p
+    bic = n * np.log(sse / n) + p * np.log(n)
+
+    dropped: str | float
+    if dummy_family == "f_dummy":
+        dropped = "F_0"
+    elif dummy_family == "weekly":
+        dropped = "W_1"
+    else:
+        dropped = np.nan
+
+    return {
+        "model_type": model_type,
+        "dummy_family": dummy_family,
+        "dropped_dummy": dropped,
+        "train_rows": n,
+        "test_rows": len(y_te),
+        "predictors": str(features),
+        "scaler_type": scaler_type,
+        "n_observations": n,
+        "n_test_observations": len(y_te),
+        "R2": round(r2, 6),
+        "AdjR2": round(adj_r2, 6),
+        "MAE": round(mae, 6),
+        "MAPE": round(mape, 6),
+        "RMSE": round(rmse, 6),
+        "Test_R2": round(test_r2, 6),
+        "AIC": round(aic, 6),
+        "BIC": round(bic, 6),
+        "y_train_actual": y_tr,
+        "y_train_pred": yhat_tr,
+        "y_test_actual": y_te,
+        "y_test_pred": yhat_te,
+        "train_periods": train[["ISO_YEAR", "ISO_WEEK"]].values,
+        "test_periods": test[["ISO_YEAR", "ISO_WEEK"]].values,
+        "coefs": coefs,
+        "features": features,
+    }
+
+
+def run_all_configs_for_entity(
+    df: pd.DataFrame,
+    scope: str,
+    entity: str,
+    channel: str,
+) -> pd.DataFrame:
+    """Run all 6 model configurations for one entity. Returns diagnostics rows."""
+    if scope == "state":
+        entity_df = df[df["STATE_CD"] == entity].copy()
+    else:
+        entity_df = df[df["Division"] == entity].copy()
+
+    entity_df = entity_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+    display_cols = [
+        "model_type", "dummy_family", "dropped_dummy", "train_rows", "test_rows",
+        "predictors", "scaler_type", "n_observations", "n_test_observations",
+        "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "AIC", "BIC",
+    ]
+
+    rows = []
+    for model_type in ["NNLS", "OLS"]:
+        for dummy_family in ["f_dummy", "weekly", "fourier"]:
+            result = fit_model_config(entity_df, channel, model_type, dummy_family)
+            if result is not None:
+                row = {
+                    "scope": scope,
+                    "entity": entity,
+                    "channel": channel,
+                    **{k: v for k, v in result.items() if k in display_cols},
+                    "_result": result,
+                }
+                rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()

@@ -172,3 +172,32 @@ def make_interpretation_sentence(channel: str, tactic: str, coefficient: float) 
         f"{channel} applications by {abs(coefficient):.2f}, holding the other tactics "
         "and time dummies constant."
     )
+
+
+# ---------------------------------------------------------------------------
+# Version 5 — Live Model Diagnostics paths
+# ---------------------------------------------------------------------------
+
+DIAGNOSTICS_DIGITAL_CANDIDATES = [
+    ROOT / "consolidated_model_diagnostics_digital.xlsx",
+]
+DIAGNOSTICS_PHYSICAL_CANDIDATES = [
+    ROOT / "consolidated_model_diagnostics_physical.xlsx",
+]
+ORIGINATIONS_V5_CANDIDATES = [
+    ROOT / "Originations_Data1_1.xlsx",
+    ROOT / "Originations_Data1.xlsx",
+    ROOT / "Originations Data1 (1).xlsx",
+]
+DIAGNOSTICS_DIGITAL_PATH = next(
+    (p for p in DIAGNOSTICS_DIGITAL_CANDIDATES if p.exists()),
+    DIAGNOSTICS_DIGITAL_CANDIDATES[0],
+)
+DIAGNOSTICS_PHYSICAL_PATH = next(
+    (p for p in DIAGNOSTICS_PHYSICAL_CANDIDATES if p.exists()),
+    DIAGNOSTICS_PHYSICAL_CANDIDATES[0],
+)
+ORIGINATIONS_V5_PATH = next(
+    (p for p in ORIGINATIONS_V5_CANDIDATES if p.exists()),
+    ORIGINATIONS_V5_CANDIDATES[0],
+)
