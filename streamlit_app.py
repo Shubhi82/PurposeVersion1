@@ -2163,8 +2163,9 @@ def render_tab_mmm_v6() -> None:
                     / res_avp["y_test_actual"][_te_mask6]
                 )) * 100) if _te_mask6.any() else float("nan")
             )
+            _train_rsq6 = _row6.get("R. Sq", _row6.get("R.Sq", _row6.get("R2", np.nan)))
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Train R²",   f"{_row6['R.Sq']:.4f}")
+            m1.metric("Train R²",   f"{_train_rsq6:.4f}" if not np.isnan(_train_rsq6) else "N/A")
             m2.metric("Train MAPE", f"{_row6['MAPE']:.2f}%")
             m3.metric("OOS RMSE",   f"{_row6['OOS RMSE']:.2f}" if not np.isnan(_row6["OOS RMSE"]) else "N/A")
             m4.metric("OOS MAPE",   f"{_te_mape6:.2f}%" if not np.isnan(_te_mape6) else "N/A")
