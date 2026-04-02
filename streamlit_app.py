@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -160,6 +161,29 @@ def render_version_intro(title: str, steps: list[str], note: str | None = None) 
     st.markdown("**What This Version Does**")
     for idx, step in enumerate(steps, start=1):
         st.write(f"{idx}. {step}")
+
+
+def _call_fit_v6_compat(fit_func, entity_df: pd.DataFrame, channel: str, cfg: dict):
+    """
+    Call fit_v6_iteration defensively.
+    Streamlit Cloud can briefly load mismatched app/module versions during deploys,
+    so only pass kwargs supported by the currently loaded function signature.
+    """
+    kwargs = {
+        "dummy_family": cfg["dummy_family"],
+        "prescreen_transform": cfg["prescreen_transform"],
+        "add_interaction": cfg["add_interaction"],
+        "drop_prescreen": cfg["drop_prescreen"],
+        "log_tactics": cfg.get("log_tactics"),
+    }
+    try:
+        signature = inspect.signature(fit_func)
+        supported = {name for name in signature.parameters}
+        kwargs = {key: value for key, value in kwargs.items() if key in supported}
+    except (TypeError, ValueError):
+        # If the signature cannot be inspected, fall back to the full kwargs set.
+        pass
+    return fit_func(entity_df, channel, **kwargs)
 
 # ---------------------------------------------------------------------------
 # Cached loaders
@@ -1969,14 +1993,7 @@ def render_tab_mmm_v6() -> None:
                     _edf = _frame[_frame["STATE_CD"] == _state].copy()
                     _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
                     for _cfg in V6_ITERATIONS:
-                        _res = _fit_v6(
-                            _edf, _ch,
-                            dummy_family=_cfg["dummy_family"],
-                            prescreen_transform=_cfg["prescreen_transform"],
-                            add_interaction=_cfg["add_interaction"],
-                            drop_prescreen=_cfg["drop_prescreen"],
-                            log_tactics=_cfg.get("log_tactics"),
-                        )
+                        _res = _call_fit_v6_compat(_fit_v6, _edf, _ch, _cfg)
                         if _res is None:
                             continue
                         _yte = _res["y_test_actual"]
@@ -2311,14 +2328,7 @@ def render_tab_mmm_v7() -> None:
             return
         _edf = _frame[_frame["STATE_CD"] == v7_state].copy()
         _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
-        _res = _fit_v7(
-            _edf, v7_ch,
-            dummy_family=v7_cfg["dummy_family"],
-            prescreen_transform=v7_cfg["prescreen_transform"],
-            add_interaction=v7_cfg["add_interaction"],
-            drop_prescreen=v7_cfg["drop_prescreen"],
-            log_tactics=v7_cfg.get("log_tactics"),
-        )
+        _res = _call_fit_v6_compat(_fit_v7, _edf, v7_ch, v7_cfg)
         if _res is None:
             st.warning("Model could not be fitted for this selection.")
             return
