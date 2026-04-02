@@ -712,9 +712,10 @@ DUMMY_FAMILIES_V5 = {
 }
 
 
-def build_modeling_frame(channel: str) -> pd.DataFrame:
+def build_modeling_frame(channel: str, product: str | None = None) -> pd.DataFrame:
     """
     Build weekly modeling frame for DIGITAL or PHYSICAL channel.
+    Optionally filter by rolled-up product (pass product name or None for all).
     Replicates notebook 00 exactly.
     """
     from sklearn.preprocessing import MinMaxScaler, StandardScaler  # noqa: F401 (ensure available)
@@ -748,7 +749,12 @@ def build_modeling_frame(channel: str) -> pd.DataFrame:
     ).reset_index()
     ms_wide.columns.name = None
 
-    # Originations: aggregate by channel
+    # Originations: optionally filter by rolled-up product, then aggregate by channel
+    if product and product != PRODUCT_ALL_LABEL and "PRODUCT_CODE" in orig.columns:
+        product_codes = expand_rollup_product(product)
+        if product_codes:
+            orig = orig[orig["PRODUCT_CODE"].isin(product_codes)].copy()
+
     orig_clean = orig.drop(
         columns=[c for c in ["H_TACTIC", "ORIGINATION_DT", "DETAIL_TACTIC", "PRODUCT_CODE"] if c in orig.columns]
     )
@@ -939,11 +945,7 @@ def run_all_configs_for_entity(
     channel: str,
 ) -> pd.DataFrame:
     """Run all 6 model configurations for one entity. Returns diagnostics rows."""
-    if scope == "state":
-        entity_df = df[df["STATE_CD"] == entity].copy()
-    else:
-        entity_df = df[df["Division"] == entity].copy()
-
+    entity_df = _resolve_entity_df(df, scope, entity)
     entity_df = entity_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
 
     display_cols = [
@@ -975,7 +977,7 @@ def run_all_configs_for_entity(
 V6_ITERATIONS = [
     {
         "num": 1,
-        "label": "Weekly dummies (W_)",
+        "label": "Week level columns",
         "dummy_family": "weekly",
         "prescreen_transform": None,
         "add_interaction": False,
@@ -983,7 +985,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 2,
-        "label": "Fortnightly dummies (F_)",
+        "label": "Bi-weekly level columns",
         "dummy_family": "f_dummy",
         "prescreen_transform": None,
         "add_interaction": False,
@@ -991,7 +993,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 3,
-        "label": "F_ + Prescreen lag (50/25/25, wks 0,1,2)",
+        "label": "Bi-weekly + Prescreen split (50/25/25, wks 0,+1,+2)",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag", "weights": [0.50, 0.25, 0.25], "lags": [0, 1, 2]},
         "add_interaction": False,
@@ -999,7 +1001,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 4,
-        "label": "F_ + Prescreen lag (25/50/25, wks -1,0,+1)",
+        "label": "Bi-weekly + Prescreen split (25/50/25, wks -1,0,+1)",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": False,
@@ -1007,33 +1009,33 @@ V6_ITERATIONS = [
     },
     {
         "num": 5,
-        "label": "F_ + Prescreen √ transform",
+        "label": "Bi-weekly + Prescreen split (25/50/25) + SQRT",
         "dummy_family": "f_dummy",
-        "prescreen_transform": {"type": "sqrt"},
+        "prescreen_transform": {"type": "lag_sqrt", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": False,
         "drop_prescreen": False,
     },
     {
         "num": 6,
-        "label": "F_ + Prescreen log(x+1) transform",
+        "label": "Bi-weekly + Prescreen split (25/50/25) + LOG",
         "dummy_family": "f_dummy",
-        "prescreen_transform": {"type": "log"},
+        "prescreen_transform": {"type": "lag_log", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": False,
         "drop_prescreen": False,
     },
     {
         "num": 7,
-        "label": "F_ + log(Prescreen) + Prescreen×DSP interaction",
+        "label": "Bi-weekly + Prescreen split (25/50/25) + LOG + Prescreen×DSP",
         "dummy_family": "f_dummy",
-        "prescreen_transform": {"type": "log"},
+        "prescreen_transform": {"type": "lag_log", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": True,
         "drop_prescreen": False,
     },
     {
         "num": 8,
-        "label": "F_ + log(Prescreen) + interaction − Prescreen main",
+        "label": "Bi-weekly + Prescreen split (25/50/25) + LOG + Prescreen×DSP − Prescreen main",
         "dummy_family": "f_dummy",
-        "prescreen_transform": {"type": "log"},
+        "prescreen_transform": {"type": "lag_log", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": True,
         "drop_prescreen": True,
     },
@@ -1082,6 +1084,15 @@ def _apply_prescreen_transform(entity_df: pd.DataFrame, transform: dict | None) 
             df = df.groupby("STATE_CD", group_keys=False).apply(_lag_group)
         else:
             df = _lag_group(df)
+
+    elif t in ("lag_sqrt", "lag_log"):
+        # Apply lag first, then nonlinear transform
+        lag_tr = {"type": "lag", "weights": transform["weights"], "lags": transform["lags"]}
+        df = _apply_prescreen_transform(df, lag_tr)
+        if t == "lag_sqrt":
+            df["Prescreen"] = np.sqrt(df["Prescreen"].clip(lower=0))
+        else:
+            df["Prescreen"] = np.log1p(df["Prescreen"].clip(lower=0))
 
     return df
 
@@ -1227,11 +1238,7 @@ def run_v6_iterations_for_entity(
     channel: str,
 ) -> pd.DataFrame:
     """Run all 8 V6 iterations (OLS) for one entity. Returns diagnostics DataFrame."""
-    if scope == "state":
-        entity_df = df[df["STATE_CD"] == entity].copy()
-    else:
-        entity_df = df[df["Division"] == entity].copy()
-
+    entity_df = _resolve_entity_df(df, scope, entity)
     entity_df = entity_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
 
     diag_keys = [
@@ -1260,6 +1267,19 @@ def run_v6_iterations_for_entity(
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+def _resolve_entity_df(df: pd.DataFrame, scope: str, entity: str) -> pd.DataFrame:
+    """Return a single-entity DataFrame, summing tactic/outcome cols for division scope."""
+    if scope == "state":
+        return df[df["STATE_CD"] == entity].copy()
+    div_df = df[df["Division"] == entity].copy()
+    tactic_sum = [c for c in TACTIC_COLS_V5 if c in div_df.columns]
+    outcome_sum = [c for c in ["NON_DM_APPLICATIONS"] if c in div_df.columns]
+    seasonal_first = [c for c in div_df.columns if c.startswith(("F_", "W_", "sin_", "cos_"))]
+    agg: dict = {c: "sum" for c in tactic_sum + outcome_sum}
+    agg.update({c: "first" for c in seasonal_first})
+    return div_df.groupby(["ISO_YEAR", "ISO_WEEK"]).agg(agg).reset_index()
+
+
 def run_ols_configs_for_entity(
     df: pd.DataFrame,
     scope: str,
@@ -1270,11 +1290,7 @@ def run_ols_configs_for_entity(
     Version 6 pipeline: OLS only, weekly and fortnightly dummies only (no NNLS, no Fourier).
     Returns 2 diagnostic rows: OLS|weekly and OLS|f_dummy.
     """
-    if scope == "state":
-        entity_df = df[df["STATE_CD"] == entity].copy()
-    else:
-        entity_df = df[df["Division"] == entity].copy()
-
+    entity_df = _resolve_entity_df(df, scope, entity)
     entity_df = entity_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
 
     display_cols = [
