@@ -968,6 +968,298 @@ def run_all_configs_for_entity(
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+# ---------------------------------------------------------------------------
+# Version 6 — 8-iteration pipeline (OLS only, Prescreen variants)
+# ---------------------------------------------------------------------------
+
+V6_ITERATIONS = [
+    {
+        "num": 1,
+        "label": "Weekly dummies (W_)",
+        "dummy_family": "weekly",
+        "prescreen_transform": None,
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 2,
+        "label": "Fortnightly dummies (F_)",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": None,
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 3,
+        "label": "F_ + Prescreen lag (50/25/25, wks 0,1,2)",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "lag", "weights": [0.50, 0.25, 0.25], "lags": [0, 1, 2]},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 4,
+        "label": "F_ + Prescreen lag (25/50/25, wks -1,0,+1)",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "lag", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 5,
+        "label": "F_ + Prescreen √ transform",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "sqrt"},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 6,
+        "label": "F_ + Prescreen log(x+1) transform",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "log"},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 7,
+        "label": "F_ + log(Prescreen) + Prescreen×DSP interaction",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "log"},
+        "add_interaction": True,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 8,
+        "label": "F_ + log(Prescreen) + interaction − Prescreen main",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "log"},
+        "add_interaction": True,
+        "drop_prescreen": True,
+    },
+]
+
+
+def _apply_prescreen_transform(entity_df: pd.DataFrame, transform: dict | None) -> pd.DataFrame:
+    """Apply Prescreen transformation in-place on a copy. Lag is applied per STATE_CD."""
+    if transform is None or "Prescreen" not in entity_df.columns:
+        return entity_df.copy()
+
+    df = entity_df.copy()
+    t = transform["type"]
+
+    if t == "sqrt":
+        df["Prescreen"] = np.sqrt(df["Prescreen"].clip(lower=0))
+
+    elif t == "log":
+        df["Prescreen"] = np.log1p(df["Prescreen"].clip(lower=0))
+
+    elif t == "lag":
+        weights = transform["weights"]
+        lags = transform["lags"]
+
+        def _lag_group(grp: pd.DataFrame) -> pd.DataFrame:
+            grp = grp.sort_values(["ISO_YEAR", "ISO_WEEK"]).copy()
+            ps = grp["Prescreen"].values.astype(float)
+            n = len(ps)
+            result = np.zeros(n)
+            for w, lag in zip(weights, lags):
+                if lag == 0:
+                    result += w * ps
+                elif lag > 0:               # lookback: result[t] uses ps[t-lag]
+                    shifted = np.zeros(n)
+                    shifted[lag:] = ps[: n - lag]
+                    result += w * shifted
+                else:                       # lookahead: result[t] uses ps[t+|lag|]
+                    k = -lag
+                    shifted = np.zeros(n)
+                    shifted[: n - k] = ps[k:]
+                    result += w * shifted
+            grp["Prescreen"] = result
+            return grp
+
+        if "STATE_CD" in df.columns:
+            df = df.groupby("STATE_CD", group_keys=False).apply(_lag_group)
+        else:
+            df = _lag_group(df)
+
+    return df
+
+
+def fit_v6_iteration(
+    entity_df: pd.DataFrame,
+    channel: str,
+    dummy_family: str,
+    prescreen_transform: dict | None = None,
+    add_interaction: bool = False,
+    drop_prescreen: bool = False,
+    train_years: list | None = None,
+    n_test_weeks: int = 8,
+) -> dict | None:
+    """
+    Fit one V6 OLS iteration.
+    Applies optional Prescreen transform (lag/sqrt/log) and optional
+    Prescreen×DSP interaction term before fitting OLS (no intercept, MinMax
+    scaler on tactic columns only).
+    """
+    from sklearn.preprocessing import MinMaxScaler
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+
+    if train_years is None:
+        train_years = [2024, 2025]
+
+    df = _apply_prescreen_transform(entity_df, prescreen_transform)
+    df = df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+    tactics = [c for c in TACTIC_COLS_V5 if c in df.columns]
+    if drop_prescreen:
+        tactics = [t for t in tactics if t != "Prescreen"]
+
+    family = DUMMY_FAMILIES_V5[dummy_family]
+    seasonal = [f for f in family["features"]() if f in df.columns]
+    if not tactics or not seasonal:
+        return None
+
+    train = df[df["ISO_YEAR"].isin(train_years)].copy()
+    next_years = sorted([y for y in df["ISO_YEAR"].unique() if y not in train_years])
+    if not next_years:
+        return None
+    test = (
+        df[(df["ISO_YEAR"] == next_years[0]) & (df["ISO_WEEK"] <= n_test_weeks)]
+        .sort_values(["ISO_YEAR", "ISO_WEEK"])
+        .copy()
+    )
+    if len(train) < 10 or len(test) == 0:
+        return None
+
+    # Scale tactic columns (MinMax, fit on train only)
+    tactic_scaler = MinMaxScaler()
+    X_tr_tactic = tactic_scaler.fit_transform(train[tactics].values.astype(float))
+    X_te_tactic = tactic_scaler.transform(test[tactics].values.astype(float))
+
+    X_tr_seasonal = train[seasonal].values.astype(float)
+    X_te_seasonal = test[seasonal].values.astype(float)
+
+    # Optional Prescreen×DSP interaction (computed on scaled values)
+    extra_features: list[str] = []
+    X_tr_extra = np.empty((len(train), 0))
+    X_te_extra = np.empty((len(test), 0))
+
+    if add_interaction and "DSP" in tactics:
+        dsp_idx = tactics.index("DSP")
+        if "Prescreen" in tactics:
+            ps_idx = tactics.index("Prescreen")
+            inter_tr = (X_tr_tactic[:, ps_idx] * X_tr_tactic[:, dsp_idx]).reshape(-1, 1)
+            inter_te = (X_te_tactic[:, ps_idx] * X_te_tactic[:, dsp_idx]).reshape(-1, 1)
+        elif "Prescreen" in df.columns:
+            # Prescreen was dropped from tactics; scale it separately for the interaction
+            ps_scaler = MinMaxScaler()
+            ps_tr = ps_scaler.fit_transform(train[["Prescreen"]].values.astype(float))
+            ps_te = ps_scaler.transform(test[["Prescreen"]].values.astype(float))
+            inter_tr = (ps_tr[:, 0] * X_tr_tactic[:, dsp_idx]).reshape(-1, 1)
+            inter_te = (ps_te[:, 0] * X_te_tactic[:, dsp_idx]).reshape(-1, 1)
+        else:
+            inter_tr = inter_te = None
+
+        if inter_tr is not None:
+            X_tr_extra = inter_tr
+            X_te_extra = inter_te
+            extra_features = ["Prescreen_x_DSP"]
+
+    X_tr = np.hstack([X_tr_tactic, X_tr_seasonal, X_tr_extra])
+    X_te = np.hstack([X_te_tactic, X_te_seasonal, X_te_extra])
+    all_features = tactics + seasonal + extra_features
+
+    y_tr = train["NON_DM_APPLICATIONS"].values.astype(float)
+    y_te = test["NON_DM_APPLICATIONS"].values.astype(float)
+
+    lr = LinearRegression(fit_intercept=False)
+    lr.fit(X_tr, y_tr)
+    yhat_tr = lr.predict(X_tr)
+    yhat_te = lr.predict(X_te)
+    coefs = lr.coef_
+
+    n, p = len(y_tr), len(all_features)
+    r2 = float(r2_score(y_tr, yhat_tr))
+    adj_r2 = 1 - (1 - r2) * (n - 1) / max(n - p - 1, 1)
+    mae = float(mean_absolute_error(y_tr, yhat_tr))
+    mask = y_tr != 0
+    mape = float(np.mean(np.abs((y_tr[mask] - yhat_tr[mask]) / y_tr[mask])) * 100) if mask.any() else np.nan
+    rmse = float(np.sqrt(mean_squared_error(y_tr, yhat_tr)))
+    test_r2 = float(r2_score(y_te, yhat_te)) if len(y_te) > 0 else np.nan
+    sse = float(np.sum((y_tr - yhat_tr) ** 2))
+    aic = float(n * np.log(sse / n) + 2 * p)
+    bic = float(n * np.log(sse / n) + p * np.log(n))
+
+    return {
+        "model_type": "OLS",
+        "dummy_family": dummy_family,
+        "train_rows": n,
+        "test_rows": len(y_te),
+        "R2": round(r2, 6),
+        "AdjR2": round(adj_r2, 6),
+        "MAE": round(mae, 6),
+        "MAPE": round(mape, 6),
+        "RMSE": round(rmse, 6),
+        "Test_R2": round(test_r2, 6),
+        "AIC": round(aic, 6),
+        "BIC": round(bic, 6),
+        "features": all_features,
+        "tactic_cols": tactics,
+        "seasonal_cols": seasonal,
+        "coefs": coefs,
+        "scaler": tactic_scaler,
+        "y_train_actual": y_tr,
+        "y_train_pred": yhat_tr,
+        "y_test_actual": y_te,
+        "y_test_pred": yhat_te,
+        "train_periods": train[["ISO_YEAR", "ISO_WEEK"]].values,
+        "test_periods": test[["ISO_YEAR", "ISO_WEEK"]].values,
+        "X_train_scaled": X_tr,
+    }
+
+
+def run_v6_iterations_for_entity(
+    df: pd.DataFrame,
+    scope: str,
+    entity: str,
+    channel: str,
+) -> pd.DataFrame:
+    """Run all 8 V6 iterations (OLS) for one entity. Returns diagnostics DataFrame."""
+    if scope == "state":
+        entity_df = df[df["STATE_CD"] == entity].copy()
+    else:
+        entity_df = df[df["Division"] == entity].copy()
+
+    entity_df = entity_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+    diag_keys = [
+        "model_type", "dummy_family", "train_rows", "test_rows",
+        "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "AIC", "BIC",
+    ]
+    rows = []
+    for cfg in V6_ITERATIONS:
+        result = fit_v6_iteration(
+            entity_df, channel,
+            dummy_family=cfg["dummy_family"],
+            prescreen_transform=cfg["prescreen_transform"],
+            add_interaction=cfg["add_interaction"],
+            drop_prescreen=cfg["drop_prescreen"],
+        )
+        if result is not None:
+            rows.append({
+                "iteration": cfg["num"],
+                "label": cfg["label"],
+                "scope": scope,
+                "entity": entity,
+                "channel": channel,
+                **{k: v for k, v in result.items() if k in diag_keys},
+                "_result": result,
+            })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 def run_ols_configs_for_entity(
     df: pd.DataFrame,
     scope: str,

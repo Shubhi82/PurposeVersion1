@@ -45,6 +45,8 @@ from data_processing import (
     prepare_raw_mmm_dataset,
     run_all_configs_for_entity,
     run_ols_configs_for_entity,
+    run_v6_iterations_for_entity,
+    V6_ITERATIONS,
     summarize_dm_data,
 )
 from modeling import fit_channel_models
@@ -1920,24 +1922,27 @@ def render_tab_mmm_v5() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Version 6 — OLS-Only Pipeline (no NNLS, no Fourier)
+# Version 6 — 8-Iteration OLS Pipeline (Prescreen Variants)
 # ---------------------------------------------------------------------------
 
 def render_tab_mmm_v6() -> None:
     render_version_intro(
-        "Version 6 — OLS-Only Regression (Weekly & Fortnightly Seasonality)",
+        "Version 6 — OLS Regression with 8 Prescreen Variants",
         [
-            "Same raw-file pipeline as V5 — builds `NON_DM_APPLICATIONS` from "
-            "`Marketing_Spend_Data.csv`, `Originations_Data1_1.xlsx`, `DM_Data.csv`.",
-            "Runs **OLS only** (no NNLS) with two seasonality variants: "
-            "Weekly dummies W_2..W_52 (W_1 dropped) and Fortnightly dummies F_1..F_25 (F_0 dropped). "
-            "Fourier terms are excluded.",
-            "Two configurations per entity: OLS | weekly and OLS | f_dummy.",
-            "Train: 2024 + 2025. Test: first 8 weeks of 2026.",
-            "MinMax scaler applied to tactic columns only (DSP, LeadGen, Paid Search, "
-            "Paid Social, Prescreen, Referrals). Dummy columns are not scaled.",
+            "Same raw-file pipeline as V5 — `NON_DM_APPLICATIONS` target, "
+            "same tactic predictors (DSP, LeadGen, Paid Search, Paid Social, Prescreen, Referrals).",
+            "**No NNLS, no Fourier.** All 8 iterations use OLS only.",
+            "**Iteration 1:** Weekly dummies W_2..W_52 (W_1 reference). "
+            "**Iteration 2:** Fortnightly dummies F_1..F_25 (F_0 reference).",
+            "**Iterations 3–4:** Fortnightly + distributed-lag Prescreen spend — "
+            "weights (50/25/25) across weeks 0,+1,+2 or (25/50/25) across weeks −1,0,+1.",
+            "**Iteration 5:** F_ + √(Prescreen).  **Iteration 6:** F_ + log(Prescreen+1).",
+            "**Iteration 7:** F_ + log(Prescreen) + Prescreen×DSP interaction term. "
+            "**Iteration 8:** Same but Prescreen main effect dropped (interaction only).",
+            "Train: 2024+2025. Test: first 8 weeks of 2026. MinMax scaler on tactic columns only.",
         ],
-        note="Sweepstakes excluded. Scaler fit on train only.",
+        note="Sweepstakes excluded. Lag is applied per state before pooling divisions. "
+             "Interaction term computed on scaled values.",
     )
 
     # ------------------------------------------------------------------
@@ -1971,12 +1976,12 @@ def render_tab_mmm_v6() -> None:
         v6_entity = st.selectbox("Entity", entity_list, key="v6_entity")
     with c4:
         st.write("")
-        v6_run = st.button("▶ Run OLS Models", key="v6_run")
+        v6_run = st.button("▶ Run All 8 Iterations", key="v6_run")
 
     cache_key = (v6_channel, v6_scope, v6_entity)
     if v6_run:
-        with st.spinner(f"Running OLS (weekly + fortnightly) for {v6_entity} ({v6_channel})…"):
-            diag_df = run_ols_configs_for_entity(frame_df, v6_scope, v6_entity, v6_channel)
+        with st.spinner(f"Running 8 OLS iterations for {v6_entity} ({v6_channel})…"):
+            diag_df = run_v6_iterations_for_entity(frame_df, v6_scope, v6_entity, v6_channel)
         if "v6_results" not in st.session_state:
             st.session_state["v6_results"] = {}
         st.session_state["v6_results"][cache_key] = diag_df
@@ -1984,17 +1989,13 @@ def render_tab_mmm_v6() -> None:
     results: pd.DataFrame | None = st.session_state.get("v6_results", {}).get(cache_key)
 
     if results is None or results.empty:
-        st.info("Select channel, scope, and entity, then click **▶ Run OLS Models**.")
+        st.info("Select channel, scope, and entity, then click **▶ Run All 8 Iterations**.")
         return
 
-    display_cols = [
-        "dummy_family", "scaler_type", "train_rows", "test_rows",
-        "R2", "AdjR2", "MAPE", "Test_R2", "AIC", "BIC",
-    ]
-    disp_df = results[display_cols].copy()
-    config_labels = [f"OLS | {row['dummy_family']}" for _, row in results.iterrows()]
+    # Config labels use the tracker iteration number + short label
+    config_labels = [f"#{int(r['iteration'])} — {r['label']}" for _, r in results.iterrows()]
 
-    # Best config (of the two)
+    # Best config across all 8
     valid = results[results["Test_R2"] > 0].copy()
     best_idx = None
     if not valid.empty:
@@ -2009,21 +2010,24 @@ def render_tab_mmm_v6() -> None:
 
     # ---- Sub-tab 1: Model Comparison ----------------------------------
     with sub_tabs[0]:
-        label_col = disp_df.copy()
-        label_col.insert(0, "Config", config_labels)
+        disp_df = results[["iteration", "label", "train_rows", "test_rows",
+                            "R2", "AdjR2", "MAPE", "Test_R2", "AIC", "BIC"]].copy()
+        disp_df.insert(0, "Config", config_labels)
         if best_idx is not None:
-            label_col["Best"] = ["⭐ Best" if i == best_idx else "" for i in range(len(results))]
+            disp_df["Best"] = ["⭐ Best" if i == best_idx else "" for i in range(len(results))]
 
         st.dataframe(
-            label_col,
+            disp_df,
             use_container_width=True,
             column_config={
-                "R2":      st.column_config.ProgressColumn("R²",      min_value=0, max_value=1, format="%.4f"),
-                "AdjR2":   st.column_config.ProgressColumn("Adj R²",  min_value=0, max_value=1, format="%.4f"),
-                "Test_R2": st.column_config.ProgressColumn("Test R²", min_value=0, max_value=1, format="%.4f"),
-                "MAPE":    st.column_config.NumberColumn("MAPE (%)", format="%.2f%%"),
-                "AIC":     st.column_config.NumberColumn("AIC",      format="%.2f"),
-                "BIC":     st.column_config.NumberColumn("BIC",      format="%.2f"),
+                "iteration": st.column_config.NumberColumn("#", format="%d"),
+                "label":     st.column_config.TextColumn("Iteration"),
+                "R2":        st.column_config.ProgressColumn("R²",      min_value=0, max_value=1, format="%.4f"),
+                "AdjR2":     st.column_config.ProgressColumn("Adj R²",  min_value=0, max_value=1, format="%.4f"),
+                "Test_R2":   st.column_config.ProgressColumn("Test R²", min_value=0, max_value=1, format="%.4f"),
+                "MAPE":      st.column_config.NumberColumn("MAPE (%)", format="%.2f%%"),
+                "AIC":       st.column_config.NumberColumn("AIC",      format="%.2f"),
+                "BIC":       st.column_config.NumberColumn("BIC",      format="%.2f"),
             },
             hide_index=True,
         )
@@ -2032,27 +2036,27 @@ def render_tab_mmm_v6() -> None:
             best = results.iloc[best_idx]
             st.markdown("**Best Configuration**")
             bc1, bc2, bc3, bc4 = st.columns(4)
-            bc1.metric("Model Type", "OLS")
-            bc2.metric("Dummy Family", best["dummy_family"])
+            bc1.metric("Iteration", f"#{int(best['iteration'])}")
+            bc2.metric("Label", best["label"][:35] + "…" if len(best["label"]) > 35 else best["label"])
             bc3.metric("Adj R²", f"{best['AdjR2']:.4f}")
             bc4.metric("Test R²", f"{best['Test_R2']:.4f}")
 
-        # Bar chart comparing the two configs
+        # Grouped bar: Adj R² and Test R² side by side for all 8 iterations
+        short_labels = [f"#{int(r['iteration'])}" for _, r in results.iterrows()]
         fig_v6 = go.Figure()
-        fig_v6.add_trace(go.Bar(
-            name="Adj R²", x=config_labels, y=results["AdjR2"].tolist(),
-            yaxis="y", marker_color="#4C78A8",
-        ))
-        fig_v6.add_trace(go.Bar(
-            name="MAPE (%)", x=config_labels, y=results["MAPE"].tolist(),
-            yaxis="y2", marker_color="#F58518",
-        ))
+        fig_v6.add_trace(go.Bar(name="Adj R²",  x=short_labels,
+                                y=results["AdjR2"].tolist(),   marker_color="#4C78A8"))
+        fig_v6.add_trace(go.Bar(name="Test R²", x=short_labels,
+                                y=results["Test_R2"].tolist(), marker_color="#54A24B"))
+        fig_v6.add_trace(go.Bar(name="MAPE (%)", x=short_labels,
+                                y=results["MAPE"].tolist(),    marker_color="#F58518",
+                                yaxis="y2"))
         fig_v6.update_layout(
-            title="Adj R² vs MAPE — Weekly vs Fortnightly",
-            yaxis=dict(title="Adj R²", range=[0, 1]),
+            title="All 8 Iterations — Adj R², Test R², MAPE",
+            yaxis=dict(title="R²", range=[0, 1]),
             yaxis2=dict(title="MAPE (%)", overlaying="y", side="right"),
-            barmode="group",
-            height=380,
+            barmode="group", height=400,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
         st.plotly_chart(fig_v6, use_container_width=True, key="v6_cmp_chart")
 
@@ -2163,6 +2167,14 @@ def render_tab_mmm_v6() -> None:
 
     # ---- Sub-tab 4: Validate vs Offline --------------------------------
     with sub_tabs[3]:
+        st.markdown("**Offline validation is available only for Iterations 1 and 2** "
+                    "(baseline weekly-dummy and fortnightly-dummy OLS configurations). "
+                    "Iterations 3–8 are new variants without pre-computed offline baselines.")
+
+        # Separate baseline iters (1 & 2) from new variants (3–8)
+        baseline_iter_nums = {1, 2}
+        baseline_family_map = {1: "weekly", 2: "f_dummy"}
+
         diag_path6 = DIAGNOSTICS_DIGITAL_PATH if v6_channel == "DIGITAL" else DIAGNOSTICS_PHYSICAL_PATH
         if not diag_path6.exists():
             st.warning("Offline diagnostics file not found. Place "
@@ -2178,8 +2190,12 @@ def render_tab_mmm_v6() -> None:
             metric_cols6 = ["R2", "AdjR2", "Test_R2", "AIC", "BIC"]
             match_count6 = 0
             cmp_rows6 = []
-            for _, live_row in results.iterrows():
-                df_fam = live_row["dummy_family"]
+
+            for iter_num, df_fam in baseline_family_map.items():
+                iter_rows = results[results["iter_num"] == iter_num] if "iter_num" in results.columns else results[results["dummy_family"] == df_fam]
+                if iter_rows.empty:
+                    continue
+                live_row = iter_rows.iloc[0]
                 ent = live_row["entity"]
                 mask6 = (
                     (offline6.get("entity", pd.Series(dtype=str)) == ent)
@@ -2187,14 +2203,14 @@ def render_tab_mmm_v6() -> None:
                     & (offline6.get("dummy_family", pd.Series(dtype=str)) == df_fam)
                 )
                 matched6 = offline6[mask6]
-                row_data6: dict = {"Config": f"OLS | {df_fam}"}
+                row_data6: dict = {"Iteration": f"#{iter_num}", "Config": f"OLS | {df_fam}"}
                 all_match6 = True
                 for m in metric_cols6:
                     live_val = live_row.get(m, np.nan)
                     off_val = float(matched6.iloc[0][m]) if not matched6.empty and m in matched6.columns else np.nan
-                    diff = abs(live_val - off_val) if not (np.isnan(live_val) or np.isnan(off_val)) else np.nan
-                    row_data6[f"{m}_live"]    = round(float(live_val), 6) if not np.isnan(live_val) else np.nan
-                    row_data6[f"{m}_offline"] = round(float(off_val),  6) if not np.isnan(off_val)  else np.nan
+                    diff = abs(live_val - off_val) if not (np.isnan(float(live_val)) or np.isnan(float(off_val))) else np.nan
+                    row_data6[f"{m}_live"]    = round(float(live_val), 6) if not np.isnan(float(live_val)) else np.nan
+                    row_data6[f"{m}_offline"] = round(float(off_val),  6) if not np.isnan(float(off_val))  else np.nan
                     row_data6[f"{m}_diff"]    = round(float(diff),     6) if diff is not None and not np.isnan(diff) else np.nan
                     if diff is None or np.isnan(diff) or diff >= 0.01:
                         all_match6 = False
@@ -2202,27 +2218,43 @@ def render_tab_mmm_v6() -> None:
                     match_count6 += 1
                 cmp_rows6.append(row_data6)
 
-            total6 = len(results)
-            if match_count6 == total6:
-                st.success(f"✅ Both configurations matched within tolerance.")
-            else:
-                st.warning(f"⚠ {total6 - match_count6} configuration(s) differ. "
-                           f"{match_count6} of {total6} matched.")
+            total_baseline = len(cmp_rows6)
+            if total_baseline > 0:
+                if match_count6 == total_baseline:
+                    st.success(f"✅ All {total_baseline} baseline configuration(s) matched within tolerance.")
+                else:
+                    st.warning(f"⚠ {total_baseline - match_count6} baseline configuration(s) differ. "
+                               f"{match_count6} of {total_baseline} matched.")
 
-            cmp_df6 = pd.DataFrame(cmp_rows6)
-            for m in metric_cols6:
-                with st.expander(f"**{m}**", expanded=(m in ["R2", "Test_R2"])):
-                    sub6 = cmp_df6[["Config", f"{m}_live", f"{m}_offline", f"{m}_diff"]].copy()
-                    sub6.columns = ["Config", "Live", "Offline", "Diff"]
+                cmp_df6 = pd.DataFrame(cmp_rows6)
+                for m in metric_cols6:
+                    with st.expander(f"**{m}**", expanded=(m in ["R2", "Test_R2"])):
+                        cols_show = ["Iteration", "Config", f"{m}_live", f"{m}_offline", f"{m}_diff"]
+                        sub6 = cmp_df6[[c for c in cols_show if c in cmp_df6.columns]].copy()
+                        sub6.columns = [c if c in ("Iteration", "Config") else c.replace(f"{m}_", "").capitalize() for c in sub6.columns]
 
-                    def _cd6(val):
-                        if val is None or (isinstance(val, float) and np.isnan(val)):
-                            return "color: gray"
-                        return "color: green" if abs(val) < 0.001 else "color: orange" if abs(val) < 0.01 else "color: red"
+                        def _cd6(val):
+                            if val is None or (isinstance(val, float) and np.isnan(val)):
+                                return "color: gray"
+                            return "color: green" if abs(val) < 0.001 else "color: orange" if abs(val) < 0.01 else "color: red"
 
-                    st.dataframe(sub6.style.applymap(_cd6, subset=["Diff"]),
-                                 use_container_width=True, hide_index=True)
-            st.caption("R², AdjR², AIC, BIC, and Test_R² are expected to match exactly.")
+                        st.dataframe(sub6.style.applymap(_cd6, subset=["Diff"]),
+                                     use_container_width=True, hide_index=True)
+                st.caption("R², AdjR², AIC, BIC, and Test_R² are expected to match exactly.")
+
+        # Show notice for new variant iterations (3–8)
+        st.markdown("---")
+        st.markdown("**Iterations 3–8 — New variants (no offline baseline)**")
+        new_variant_rows = []
+        for cfg in V6_ITERATIONS:
+            if cfg["num"] not in baseline_iter_nums:
+                new_variant_rows.append({
+                    "Iteration": f"#{cfg['num']}",
+                    "Label": cfg["label"],
+                    "Status": "No offline baseline — live metrics only",
+                })
+        if new_variant_rows:
+            st.dataframe(pd.DataFrame(new_variant_rows), use_container_width=True, hide_index=True)
 
 
 # ---------------------------------------------------------------------------
