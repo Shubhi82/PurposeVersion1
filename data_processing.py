@@ -1273,7 +1273,7 @@ def _resolve_entity_df(df: pd.DataFrame, scope: str, entity: str) -> pd.DataFram
         return df[df["STATE_CD"] == entity].copy()
     div_df = df[df["Division"] == entity].copy()
     tactic_sum = [c for c in TACTIC_COLS_V5 if c in div_df.columns]
-    outcome_sum = [c for c in ["NON_DM_APPLICATIONS"] if c in div_df.columns]
+    outcome_sum = [c for c in ["APPLICATIONS", "NON_DM_APPLICATIONS"] if c in div_df.columns]
     seasonal_first = [c for c in div_df.columns if c.startswith(("F_", "W_", "sin_", "cos_"))]
     agg: dict = {c: "sum" for c in tactic_sum + outcome_sum}
     agg.update({c: "first" for c in seasonal_first})

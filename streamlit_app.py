@@ -1945,7 +1945,7 @@ def render_tab_mmm_v6() -> None:
     # ------------------------------------------------------------------
     from utils import (
         MARKETING_SPEND_PATH as _msp6, DM_DATA_PATH as _dmp6,
-        ORIGINATIONS_V5_PATH as _op6, get_available_rolled_up_products,
+        ORIGINATIONS_V5_PATH as _op6,
     )
     from data_processing import fit_v6_iteration as _fit_v6, TACTIC_COLS_V5 as _v6_tactics
 
@@ -1954,32 +1954,14 @@ def render_tab_mmm_v6() -> None:
         st.error(f"Missing raw data files: {', '.join(missing)}")
         return
 
-    fc1, fc2 = st.columns([3, 1])
-    with fc1:
-        try:
-            _tmp = cached_build_modeling_frame("DIGITAL")
-            _rp_set: set = set()
-            for _s in _V6_FIXED_STATES:
-                _pl = get_available_rolled_up_products(_tmp, _s)
-                _rp_set.update(p for p in _pl if p != "All Products")
-            _rp_list = sorted(_rp_set)
-        except Exception:
-            _rp_list = []
-        v6_product = st.selectbox(
-            "Product (rolled-up)", ["All Products"] + _rp_list, key="v6_product"
-        )
-    with fc2:
-        st.write("")
-        v6_run = st.button("▶ Run All", key="v6_run")
+    v6_run = st.button("▶ Run All", key="v6_run")
 
     if v6_run:
         all_rows = []
         with st.spinner("Running 64 configurations (8 iterations × AL/CA/DE/FL × DIGITAL/PHYSICAL)…"):
             for _ch in ["DIGITAL", "PHYSICAL"]:
                 try:
-                    _frame = cached_build_modeling_frame(
-                        _ch, "" if v6_product == "All Products" else v6_product
-                    )
+                    _frame = cached_build_modeling_frame(_ch)
                 except Exception as exc:
                     st.warning(f"Could not build frame for {_ch}: {exc}")
                     continue
