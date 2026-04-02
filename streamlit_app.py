@@ -1944,7 +1944,7 @@ def render_tab_mmm_v6() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Filter row: product + run button
+    # Filters
     # ------------------------------------------------------------------
     from utils import (
         MARKETING_SPEND_PATH as _msp6, DM_DATA_PATH as _dmp6,
@@ -1957,78 +1957,130 @@ def render_tab_mmm_v6() -> None:
         st.error(f"Missing raw data files: {', '.join(missing)}")
         return
 
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        # Build product list: union of rolled-up products across all 4 fixed states
+    # Row 1: scope + product
+    fc1, fc2 = st.columns([1, 3])
+    with fc1:
+        v6_scope = st.selectbox("Scope", ["state", "division"], key="v6_scope")
+    with fc2:
+        # Build product list from all available states
         try:
             _tmp = cached_build_modeling_frame("DIGITAL")
+            _all_states_tmp = sorted(_tmp["STATE_CD"].dropna().unique().tolist())
             _rp_set: set = set()
-            for _s in _V6_FIXED_STATES:
+            for _s in _all_states_tmp[:10]:  # sample up to 10 states for speed
                 _pl = get_available_rolled_up_products(_tmp, _s)
                 _rp_set.update(p for p in _pl if p != "All Products")
             _rp_list = sorted(_rp_set)
         except Exception:
             _rp_list = []
+            _tmp = None
         v6_product = st.selectbox(
             "Product (rolled-up)", ["All Products"] + _rp_list, key="v6_product"
         )
-    with c2:
+
+    # Row 2: channel + state/division multiselect + dummy family + run button
+    try:
+        _frame_disc = _tmp if _tmp is not None else cached_build_modeling_frame("DIGITAL")
+        if v6_scope == "state":
+            _entity_opts = sorted(_frame_disc["STATE_CD"].dropna().unique().tolist())
+        else:
+            _entity_opts = sorted(_frame_disc["Division"].dropna().dropna().unique().tolist())
+    except Exception:
+        _entity_opts = _V6_FIXED_STATES
+
+    fc3, fc4, fc5, fc6 = st.columns([1, 2, 2, 1])
+    with fc3:
+        v6_channels = st.multiselect(
+            "Channel", ["DIGITAL", "PHYSICAL"], default=["DIGITAL", "PHYSICAL"], key="v6_channels"
+        )
+    with fc4:
+        _default_states = [s for s in _V6_FIXED_STATES if s in _entity_opts] or _entity_opts[:4]
+        v6_entities = st.multiselect(
+            "State / Division" if v6_scope == "division" else "State",
+            _entity_opts, default=_default_states, key="v6_entities"
+        )
+    with fc5:
+        _fam_opts = ["Weekly (W_)", "Fortnightly (F_)"]
+        v6_families = st.multiselect(
+            "Seasonality", _fam_opts, default=_fam_opts, key="v6_families"
+        )
+    with fc6:
         st.write("")
-        v6_run = st.button("▶ Run All Iterations", key="v6_run")
+        v6_run = st.button("▶ Run", key="v6_run")
+
+    # Map family filter to dummy_family values
+    _run_families: set[str] = set()
+    if "Weekly (W_)" in v6_families:
+        _run_families.add("weekly")
+    if "Fortnightly (F_)" in v6_families:
+        _run_families.add("f_dummy")
+    _active_iters = [c for c in V6_ITERATIONS if c["dummy_family"] in _run_families]
 
     if v6_run:
-        all_rows = []
-        with st.spinner("Running 64 configurations (8 iterations × 4 states × 2 channels)…"):
-            for _ch in _V6_CHANNELS:
-                try:
-                    _frame = cached_build_modeling_frame(
-                        _ch, "" if v6_product == "All Products" else v6_product
-                    )
-                except Exception as exc:
-                    st.warning(f"Could not build frame for {_ch}: {exc}")
-                    continue
-                for _state in _V6_FIXED_STATES:
-                    _edf = _frame[_frame["STATE_CD"] == _state].copy()
-                    _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
-                    for _cfg in V6_ITERATIONS:
-                        _res = _fit_v6(
-                            _edf, _ch,
-                            dummy_family=_cfg["dummy_family"],
-                            prescreen_transform=_cfg["prescreen_transform"],
-                            add_interaction=_cfg["add_interaction"],
-                            drop_prescreen=_cfg["drop_prescreen"],
+        if not v6_channels:
+            st.warning("Select at least one channel.")
+        elif not v6_entities:
+            st.warning("Select at least one state / division.")
+        elif not _active_iters:
+            st.warning("Select at least one seasonality family.")
+        else:
+            all_rows = []
+            _n_total = len(v6_channels) * len(v6_entities) * len(_active_iters)
+            with st.spinner(f"Running {_n_total} configurations…"):
+                for _ch in v6_channels:
+                    try:
+                        _frame = cached_build_modeling_frame(
+                            _ch, "" if v6_product == "All Products" else v6_product
                         )
-                        if _res is None:
-                            continue
-                        _yte = _res["y_test_actual"]
-                        _ytp = _res["y_test_pred"]
-                        _oos_rmse = float(np.sqrt(np.mean((_yte - _ytp) ** 2))) if len(_yte) > 0 else np.nan
-                        _tac_coefs = [
-                            (f, float(c))
-                            for f, c in zip(_res["features"], _res["coefs"])
-                            if f in _res.get("tactic_cols", [])
-                        ]
-                        _coef_str = " | ".join(f"{f}: {c:.3f}" for f, c in _tac_coefs)
-                        all_rows.append({
-                            "iter_num":     _cfg["num"],
-                            "Iteration":    _cfg["label"],
-                            "State":        _state,
-                            "Channel":      _ch,
-                            "MAPE":         round(float(_res["MAPE"]), 2),
-                            "R.Sq":         round(float(_res["R2"]), 4),
-                            "RMSE":         round(float(_res["RMSE"]), 2),
-                            "OOS RMSE":     round(_oos_rmse, 2) if not np.isnan(_oos_rmse) else np.nan,
-                            "Coefficients": _coef_str,
-                            "_result":      _res,
-                            "_state":       _state,
-                            "_channel":     _ch,
-                        })
-        st.session_state["v6_all"] = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
+                    except Exception as exc:
+                        st.warning(f"Could not build frame for {_ch}: {exc}")
+                        continue
+                    for _entity in v6_entities:
+                        if v6_scope == "state":
+                            _edf = _frame[_frame["STATE_CD"] == _entity].copy()
+                        else:
+                            from data_processing import _resolve_entity_df as _red
+                            _edf = _red(_frame, "division", _entity)
+                        _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+                        for _cfg in _active_iters:
+                            _res = _fit_v6(
+                                _edf, _ch,
+                                dummy_family=_cfg["dummy_family"],
+                                prescreen_transform=_cfg["prescreen_transform"],
+                                add_interaction=_cfg["add_interaction"],
+                                drop_prescreen=_cfg["drop_prescreen"],
+                            )
+                            if _res is None:
+                                continue
+                            _yte = _res["y_test_actual"]
+                            _ytp = _res["y_test_pred"]
+                            _oos_rmse = float(np.sqrt(np.mean((_yte - _ytp) ** 2))) if len(_yte) > 0 else np.nan
+                            _tac_coefs = [
+                                (f, float(c))
+                                for f, c in zip(_res["features"], _res["coefs"])
+                                if f in _res.get("tactic_cols", [])
+                            ]
+                            _coef_str = " | ".join(f"{f}: {c:.3f}" for f, c in _tac_coefs)
+                            all_rows.append({
+                                "iter_num":     _cfg["num"],
+                                "Iteration":    _cfg["label"],
+                                "State":        _entity,
+                                "Channel":      _ch,
+                                "MAPE":         round(float(_res["MAPE"]), 2),
+                                "R.Sq":         round(float(_res["R2"]), 4),
+                                "RMSE":         round(float(_res["RMSE"]), 2),
+                                "OOS RMSE":     round(_oos_rmse, 2) if not np.isnan(_oos_rmse) else np.nan,
+                                "Coefficients": _coef_str,
+                                "_result":      _res,
+                                "_state":       _entity,
+                                "_channel":     _ch,
+                            })
+            st.session_state["v6_all"] = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
 
     all_results: pd.DataFrame | None = st.session_state.get("v6_all")
 
     if all_results is None or all_results.empty:
-        st.info("Click **▶ Run All Iterations** to compute all 64 configurations.")
+        st.info("Set filters above and click **▶ Run** to compute configurations.")
         return
 
     sub_tabs = st.tabs([
@@ -2065,14 +2117,16 @@ def render_tab_mmm_v6() -> None:
 
     # ---- Sub-tab 2: Actual vs Predicted -------------------------------
     with sub_tabs[1]:
-        _iter_labels = [cfg["label"] for cfg in V6_ITERATIONS]
+        _avp_states = sorted(all_results["_state"].unique().tolist())
+        _avp_channels = sorted(all_results["_channel"].unique().tolist())
+        _avp_iters = all_results.sort_values("iter_num")["Iteration"].unique().tolist()
         ac1, ac2, ac3 = st.columns(3)
         with ac1:
-            sel_state_avp = st.selectbox("State", _V6_FIXED_STATES, key="v6_avp_state")
+            sel_state_avp = st.selectbox("State", _avp_states, key="v6_avp_state")
         with ac2:
-            sel_ch_avp = st.selectbox("Channel", _V6_CHANNELS, key="v6_avp_ch")
+            sel_ch_avp = st.selectbox("Channel", _avp_channels, key="v6_avp_ch")
         with ac3:
-            sel_iter_avp = st.selectbox("Iteration", _iter_labels, key="v6_avp_iter")
+            sel_iter_avp = st.selectbox("Iteration", _avp_iters, key="v6_avp_iter")
 
         _match_avp = all_results[
             (all_results["_state"] == sel_state_avp) &
@@ -2146,11 +2200,11 @@ def render_tab_mmm_v6() -> None:
     with sub_tabs[2]:
         cc1, cc2, cc3 = st.columns(3)
         with cc1:
-            sel_state_coef = st.selectbox("State", _V6_FIXED_STATES, key="v6_coef_state")
+            sel_state_coef = st.selectbox("State", _avp_states, key="v6_coef_state")
         with cc2:
-            sel_ch_coef = st.selectbox("Channel", _V6_CHANNELS, key="v6_coef_ch")
+            sel_ch_coef = st.selectbox("Channel", _avp_channels, key="v6_coef_ch")
         with cc3:
-            sel_iter_coef = st.selectbox("Iteration", [cfg["label"] for cfg in V6_ITERATIONS], key="v6_coef_iter")
+            sel_iter_coef = st.selectbox("Iteration", _avp_iters, key="v6_coef_iter")
 
         _match_coef = all_results[
             (all_results["_state"] == sel_state_coef) &
@@ -2192,8 +2246,8 @@ def render_tab_mmm_v6() -> None:
             "against pre-computed diagnostics. A separate channel selector is provided; "
             "iterations 3–8 have no offline baseline."
         )
-        _val_ch = st.selectbox("Channel for validation", _V6_CHANNELS, key="v6_val_ch")
-        _val_state = st.selectbox("State for validation", _V6_FIXED_STATES, key="v6_val_state")
+        _val_ch = st.selectbox("Channel for validation", _avp_channels, key="v6_val_ch")
+        _val_state = st.selectbox("State for validation", _avp_states, key="v6_val_state")
 
         _diag_path6 = DIAGNOSTICS_DIGITAL_PATH if _val_ch == "DIGITAL" else DIAGNOSTICS_PHYSICAL_PATH
         if not _diag_path6.exists():
