@@ -966,3 +966,41 @@ def run_all_configs_for_entity(
                 }
                 rows.append(row)
     return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def run_ols_configs_for_entity(
+    df: pd.DataFrame,
+    scope: str,
+    entity: str,
+    channel: str,
+) -> pd.DataFrame:
+    """
+    Version 6 pipeline: OLS only, weekly and fortnightly dummies only (no NNLS, no Fourier).
+    Returns 2 diagnostic rows: OLS|weekly and OLS|f_dummy.
+    """
+    if scope == "state":
+        entity_df = df[df["STATE_CD"] == entity].copy()
+    else:
+        entity_df = df[df["Division"] == entity].copy()
+
+    entity_df = entity_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+    display_cols = [
+        "model_type", "dummy_family", "dropped_dummy", "train_rows", "test_rows",
+        "predictors", "scaler_type", "n_observations", "n_test_observations",
+        "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "AIC", "BIC",
+    ]
+
+    rows = []
+    for dummy_family in ["weekly", "f_dummy"]:
+        result = fit_model_config(entity_df, channel, "OLS", dummy_family)
+        if result is not None:
+            row = {
+                "scope": scope,
+                "entity": entity,
+                "channel": channel,
+                **{k: v for k, v in result.items() if k in display_cols},
+                "_result": result,
+            }
+            rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
