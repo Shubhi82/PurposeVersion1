@@ -2515,13 +2515,13 @@ def render_tab_mmm_v7() -> None:
 tabs = st.tabs([
     "📊 Marketing Spend EDA",
     "📈 Originations EDA",
-    "🔬 Marketing Analysis",
-    "🧪 Marketing Analysis V2",
-    "🧩 Marketing Analysis V3",
-    "🧱 Marketing Analysis V4",
-    "🔬 Marketing Analysis V5",
-    "📐 Marketing Analysis V6",
-    "🧮 Metric Calculator V7",
+    "🔬 V1",
+    "🧪 V2",
+    "🧩 V3",
+    "🧱 V4",
+    "🔬 V5",
+    "📐 V6",
+    "🧮 V7",
 ])
 
 with tabs[0]:
