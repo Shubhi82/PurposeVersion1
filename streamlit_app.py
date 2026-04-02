@@ -1933,7 +1933,7 @@ def render_tab_mmm_v6() -> None:
     render_version_intro(
         "Version 6 — OLS Regression Diagnostic Table",
         [
-            "Fixed scope: states AL, CA, DE, FL × channels DIGITAL, PHYSICAL × 8 iterations = 64 configurations.",
+            "Fixed scope: states AL, CA, DE, FL × channels DIGITAL, PHYSICAL × 16 iterations = 128 configurations.",
             "**No NNLS, no Fourier.** OLS only. Target: NON_DM_APPLICATIONS.",
             "Train: 2024 + 2025. OOS test: first 8 weeks of 2026.",
         ],
@@ -1958,7 +1958,7 @@ def render_tab_mmm_v6() -> None:
 
     if v6_run:
         all_rows = []
-        with st.spinner("Running 64 configurations (8 iterations × AL/CA/DE/FL × DIGITAL/PHYSICAL)…"):
+        with st.spinner("Running 128 configurations (16 iterations × AL/CA/DE/FL × DIGITAL/PHYSICAL)…"):
             for _ch in ["DIGITAL", "PHYSICAL"]:
                 try:
                     _frame = cached_build_modeling_frame(_ch)
@@ -1975,6 +1975,7 @@ def render_tab_mmm_v6() -> None:
                             prescreen_transform=_cfg["prescreen_transform"],
                             add_interaction=_cfg["add_interaction"],
                             drop_prescreen=_cfg["drop_prescreen"],
+                            log_tactics=_cfg.get("log_tactics"),
                         )
                         if _res is None:
                             continue

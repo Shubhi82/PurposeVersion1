@@ -1039,6 +1039,74 @@ V6_ITERATIONS = [
         "add_interaction": True,
         "drop_prescreen": True,
     },
+    # --- Additional lag weight variants (all with LOG on Prescreen) ---
+    {
+        "num": 9,
+        "label": "Bi-weekly columns + Pre-screen equal split (33, 34, 33) across weeks -1, 0, 1 + LOG transformation on Prescreen",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "lag_log", "weights": [0.33, 0.34, 0.33], "lags": [-1, 0, 1]},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 10,
+        "label": "Bi-weekly columns + Pre-screen front-weighted (75, 25, 0) across weeks 0, 1, 2 + LOG transformation on Prescreen",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "lag_log", "weights": [0.75, 0.25, 0.0], "lags": [0, 1, 2]},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 11,
+        "label": "Bi-weekly columns + Pre-screen delayed response (0, 25, 75) across weeks -1, 0, 1 + LOG transformation on Prescreen",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "lag_log", "weights": [0.0, 0.25, 0.75], "lags": [-1, 0, 1]},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 12,
+        "label": "Bi-weekly columns + Pre-screen 4-week spread (10, 40, 40, 10) across weeks -1, 0, 1, 2 + LOG transformation on Prescreen",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "lag_log", "weights": [0.10, 0.40, 0.40, 0.10], "lags": [-1, 0, 1, 2]},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    # --- Geometric adstock variants (carryover effect on Prescreen) ---
+    {
+        "num": 13,
+        "label": "Bi-weekly columns + Adstock α=0.3 on Prescreen (fast decay) + LOG transformation on Prescreen",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "adstock_log", "alpha": 0.3},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 14,
+        "label": "Bi-weekly columns + Adstock α=0.5 on Prescreen (medium decay) + LOG transformation on Prescreen",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "adstock_log", "alpha": 0.5},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    {
+        "num": 15,
+        "label": "Bi-weekly columns + Adstock α=0.7 on Prescreen (slow decay) + LOG transformation on Prescreen",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "adstock_log", "alpha": 0.7},
+        "add_interaction": False,
+        "drop_prescreen": False,
+    },
+    # --- Saturation on both Prescreen and DSP ---
+    {
+        "num": 16,
+        "label": "Bi-weekly columns + Pre-screen split (25, 50, 25) -1, 0, 1 + LOG Prescreen + LOG DSP (saturation on both key tactics)",
+        "dummy_family": "f_dummy",
+        "prescreen_transform": {"type": "lag_log", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
+        "add_interaction": False,
+        "drop_prescreen": False,
+        "log_tactics": ["DSP"],
+    },
 ]
 
 
@@ -1094,6 +1162,27 @@ def _apply_prescreen_transform(entity_df: pd.DataFrame, transform: dict | None) 
         else:
             df["Prescreen"] = np.log1p(df["Prescreen"].clip(lower=0))
 
+    elif t in ("adstock", "adstock_log"):
+        # Geometric adstock: adstock[t] = spend[t] + alpha * adstock[t-1]
+        alpha = float(transform.get("alpha", 0.5))
+
+        def _adstock_group(grp: pd.DataFrame) -> pd.DataFrame:
+            grp = grp.sort_values(["ISO_YEAR", "ISO_WEEK"]).copy()
+            ps = grp["Prescreen"].values.astype(float)
+            result = np.zeros(len(ps))
+            result[0] = ps[0]
+            for i in range(1, len(ps)):
+                result[i] = ps[i] + alpha * result[i - 1]
+            grp["Prescreen"] = result
+            return grp
+
+        if "STATE_CD" in df.columns:
+            df = df.groupby("STATE_CD", group_keys=False).apply(_adstock_group)
+        else:
+            df = _adstock_group(df)
+        if t == "adstock_log":
+            df["Prescreen"] = np.log1p(df["Prescreen"].clip(lower=0))
+
     return df
 
 
@@ -1104,14 +1193,16 @@ def fit_v6_iteration(
     prescreen_transform: dict | None = None,
     add_interaction: bool = False,
     drop_prescreen: bool = False,
+    log_tactics: list | None = None,
     train_years: list | None = None,
     n_test_weeks: int = 8,
 ) -> dict | None:
     """
     Fit one V6 OLS iteration.
-    Applies optional Prescreen transform (lag/sqrt/log) and optional
+    Applies optional Prescreen transform (lag/sqrt/log/adstock) and optional
     Prescreen×DSP interaction term before fitting OLS (no intercept, MinMax
-    scaler on tactic columns only).
+    scaler on tactic columns only). log_tactics applies log1p to named tactic
+    columns before scaling (e.g. ["DSP"] for saturation on DSP spend).
     """
     from sklearn.preprocessing import MinMaxScaler
     from sklearn.linear_model import LinearRegression
@@ -1122,6 +1213,12 @@ def fit_v6_iteration(
 
     df = _apply_prescreen_transform(entity_df, prescreen_transform)
     df = df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+    # Apply LOG to specified tactic columns before scaling (saturation transform)
+    if log_tactics:
+        for _col in log_tactics:
+            if _col in df.columns:
+                df[_col] = np.log1p(df[_col].clip(lower=0))
 
     tactics = [c for c in TACTIC_COLS_V5 if c in df.columns]
     if drop_prescreen:
@@ -1253,6 +1350,7 @@ def run_v6_iterations_for_entity(
             prescreen_transform=cfg["prescreen_transform"],
             add_interaction=cfg["add_interaction"],
             drop_prescreen=cfg["drop_prescreen"],
+            log_tactics=cfg.get("log_tactics"),
         )
         if result is not None:
             rows.append({
