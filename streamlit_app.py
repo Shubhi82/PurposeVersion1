@@ -1691,44 +1691,68 @@ def render_tab_mmm_v5() -> None:
         all_pred = np.concatenate([res2["y_train_pred"], res2["y_test_pred"]])
         n_train = len(train_labels)
 
-        # Actual vs Predicted chart
+        # Actual vs Predicted chart — use integer x-axis so add_vline works correctly
+        n_tr = len(train_labels)
+        n_te = len(test_labels)
+        x_tr = list(range(n_tr))
+        x_te = list(range(n_tr, n_tr + n_te))
+        x_all = list(range(n_tr + n_te))
+
         fig_avp = go.Figure()
         fig_avp.add_trace(go.Scatter(
-            x=train_labels, y=res2["y_train_actual"].tolist(),
+            x=x_tr, y=res2["y_train_actual"].tolist(),
             mode="lines", name="Actual (Train)", line=dict(color="#4C78A8", width=2),
         ))
         fig_avp.add_trace(go.Scatter(
-            x=train_labels, y=res2["y_train_pred"].tolist(),
+            x=x_tr, y=res2["y_train_pred"].tolist(),
             mode="lines", name="Predicted (Train)", line=dict(color="#4C78A8", width=2, dash="dash"),
         ))
         fig_avp.add_trace(go.Scatter(
-            x=test_labels, y=res2["y_test_actual"].tolist(),
+            x=x_te, y=res2["y_test_actual"].tolist(),
             mode="lines", name="Actual (Test)", line=dict(color="#F58518", width=2),
         ))
         fig_avp.add_trace(go.Scatter(
-            x=test_labels, y=res2["y_test_pred"].tolist(),
+            x=x_te, y=res2["y_test_pred"].tolist(),
             mode="lines", name="Predicted (Test)", line=dict(color="#F58518", width=2, dash="dash"),
         ))
-        if train_labels:
+        if n_tr > 0:
             fig_avp.add_vline(
-                x=train_labels[-1], line_dash="dot", line_color="gray",
+                x=n_tr - 0.5, line_dash="dot", line_color="gray",
                 annotation_text="Train | Test", annotation_position="top right",
             )
         fig_avp.update_layout(
             title=f"Actual vs Predicted — {sel_label_2}",
-            xaxis_title="Period", yaxis_title="NON_DM_APPLICATIONS",
-            height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            xaxis=dict(
+                title="Period",
+                tickmode="array",
+                tickvals=x_all,
+                ticktext=all_labels,
+                tickangle=-90,
+            ),
+            yaxis_title="NON_DM_APPLICATIONS",
+            height=420,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
         st.plotly_chart(fig_avp, use_container_width=True, key="v5_avp_chart")
 
         # Residuals chart
         residuals = all_actual - all_pred
         colors = ["#E45756" if r < 0 else "#4C78A8" for r in residuals]
-        fig_res = go.Figure(go.Bar(x=all_labels, y=residuals.tolist(), marker_color=colors))
+        fig_res = go.Figure(go.Bar(x=x_all, y=residuals.tolist(), marker_color=colors))
         fig_res.add_hline(y=0, line_color="black", line_width=1)
+        if n_tr > 0:
+            fig_res.add_vline(x=n_tr - 0.5, line_dash="dot", line_color="gray")
         fig_res.update_layout(
-            title="Residuals (Actual − Predicted)", xaxis_title="Period",
-            yaxis_title="Residual", height=300,
+            title="Residuals (Actual − Predicted)",
+            xaxis=dict(
+                title="Period",
+                tickmode="array",
+                tickvals=x_all,
+                ticktext=all_labels,
+                tickangle=-90,
+            ),
+            yaxis_title="Residual",
+            height=300,
         )
         st.plotly_chart(fig_res, use_container_width=True, key="v5_res_chart")
 
