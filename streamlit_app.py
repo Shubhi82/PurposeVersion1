@@ -1931,20 +1931,17 @@ _V6_CHANNELS = ["DIGITAL", "PHYSICAL"]
 
 def render_tab_mmm_v6() -> None:
     render_version_intro(
-        "Version 6 — OLS Regression with 8 Prescreen Variants",
+        "Version 6 — OLS Regression Diagnostic Table",
         [
-            "Runs all 8 iterations × 4 states (AL, CA, DE, FL) × 2 channels = 64 configurations.",
+            "Fixed scope: states AL, CA, DE, FL × channels DIGITAL, PHYSICAL × 8 iterations = 64 configurations.",
             "**No NNLS, no Fourier.** OLS only. Target: NON_DM_APPLICATIONS.",
-            "Iterations 1–2: weekly / bi-weekly dummies as baseline.",
-            "Iterations 3–4: bi-weekly + distributed-lag Prescreen (50/25/25 or 25/50/25).",
-            "Iterations 5–8: bi-weekly + lag (25/50/25) + SQRT or LOG transform ± interaction.",
-            "Train: 2024+2025. OOS test: first 8 weeks of 2026.",
+            "Train: 2024 + 2025. OOS test: first 8 weeks of 2026.",
         ],
-        note="Sweepstakes excluded. Lag applied per state. Interaction on scaled values.",
+        note="Sweepstakes excluded. Lag applied per state. Interaction computed on scaled values.",
     )
 
     # ------------------------------------------------------------------
-    # Filters
+    # Controls
     # ------------------------------------------------------------------
     from utils import (
         MARKETING_SPEND_PATH as _msp6, DM_DATA_PATH as _dmp6,
@@ -1957,174 +1954,149 @@ def render_tab_mmm_v6() -> None:
         st.error(f"Missing raw data files: {', '.join(missing)}")
         return
 
-    # Row 1: scope + product
-    fc1, fc2 = st.columns([1, 3])
+    fc1, fc2 = st.columns([3, 1])
     with fc1:
-        v6_scope = st.selectbox("Scope", ["state", "division"], key="v6_scope")
-    with fc2:
-        # Build product list from all available states
         try:
             _tmp = cached_build_modeling_frame("DIGITAL")
-            _all_states_tmp = sorted(_tmp["STATE_CD"].dropna().unique().tolist())
             _rp_set: set = set()
-            for _s in _all_states_tmp[:10]:  # sample up to 10 states for speed
+            for _s in _V6_FIXED_STATES:
                 _pl = get_available_rolled_up_products(_tmp, _s)
                 _rp_set.update(p for p in _pl if p != "All Products")
             _rp_list = sorted(_rp_set)
         except Exception:
             _rp_list = []
-            _tmp = None
         v6_product = st.selectbox(
             "Product (rolled-up)", ["All Products"] + _rp_list, key="v6_product"
         )
-
-    # Row 2: channel + state/division multiselect + dummy family + run button
-    try:
-        _frame_disc = _tmp if _tmp is not None else cached_build_modeling_frame("DIGITAL")
-        if v6_scope == "state":
-            _entity_opts = sorted(_frame_disc["STATE_CD"].dropna().unique().tolist())
-        else:
-            _entity_opts = sorted(_frame_disc["Division"].dropna().dropna().unique().tolist())
-    except Exception:
-        _entity_opts = _V6_FIXED_STATES
-
-    fc3, fc4, fc5, fc6 = st.columns([1, 2, 2, 1])
-    with fc3:
-        v6_channels = st.multiselect(
-            "Channel", ["DIGITAL", "PHYSICAL"], default=["DIGITAL", "PHYSICAL"], key="v6_channels"
-        )
-    with fc4:
-        _default_states = [s for s in _V6_FIXED_STATES if s in _entity_opts] or _entity_opts[:4]
-        v6_entities = st.multiselect(
-            "State / Division" if v6_scope == "division" else "State",
-            _entity_opts, default=_default_states, key="v6_entities"
-        )
-    with fc5:
-        _fam_opts = ["Weekly (W_)", "Fortnightly (F_)"]
-        v6_families = st.multiselect(
-            "Seasonality", _fam_opts, default=_fam_opts, key="v6_families"
-        )
-    with fc6:
+    with fc2:
         st.write("")
-        v6_run = st.button("▶ Run", key="v6_run")
-
-    # Map family filter to dummy_family values
-    _run_families: set[str] = set()
-    if "Weekly (W_)" in v6_families:
-        _run_families.add("weekly")
-    if "Fortnightly (F_)" in v6_families:
-        _run_families.add("f_dummy")
-    _active_iters = [c for c in V6_ITERATIONS if c["dummy_family"] in _run_families]
+        v6_run = st.button("▶ Run All", key="v6_run")
 
     if v6_run:
-        if not v6_channels:
-            st.warning("Select at least one channel.")
-        elif not v6_entities:
-            st.warning("Select at least one state / division.")
-        elif not _active_iters:
-            st.warning("Select at least one seasonality family.")
-        else:
-            all_rows = []
-            _n_total = len(v6_channels) * len(v6_entities) * len(_active_iters)
-            with st.spinner(f"Running {_n_total} configurations…"):
-                for _ch in v6_channels:
-                    try:
-                        _frame = cached_build_modeling_frame(
-                            _ch, "" if v6_product == "All Products" else v6_product
+        all_rows = []
+        with st.spinner("Running 64 configurations (8 iterations × AL/CA/DE/FL × DIGITAL/PHYSICAL)…"):
+            for _ch in ["DIGITAL", "PHYSICAL"]:
+                try:
+                    _frame = cached_build_modeling_frame(
+                        _ch, "" if v6_product == "All Products" else v6_product
+                    )
+                except Exception as exc:
+                    st.warning(f"Could not build frame for {_ch}: {exc}")
+                    continue
+                for _state in _V6_FIXED_STATES:
+                    _edf = _frame[_frame["STATE_CD"] == _state].copy()
+                    _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+                    for _cfg in V6_ITERATIONS:
+                        _res = _fit_v6(
+                            _edf, _ch,
+                            dummy_family=_cfg["dummy_family"],
+                            prescreen_transform=_cfg["prescreen_transform"],
+                            add_interaction=_cfg["add_interaction"],
+                            drop_prescreen=_cfg["drop_prescreen"],
                         )
-                    except Exception as exc:
-                        st.warning(f"Could not build frame for {_ch}: {exc}")
-                        continue
-                    for _entity in v6_entities:
-                        if v6_scope == "state":
-                            _edf = _frame[_frame["STATE_CD"] == _entity].copy()
-                        else:
-                            from data_processing import _resolve_entity_df as _red
-                            _edf = _red(_frame, "division", _entity)
-                        _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
-                        for _cfg in _active_iters:
-                            _res = _fit_v6(
-                                _edf, _ch,
-                                dummy_family=_cfg["dummy_family"],
-                                prescreen_transform=_cfg["prescreen_transform"],
-                                add_interaction=_cfg["add_interaction"],
-                                drop_prescreen=_cfg["drop_prescreen"],
-                            )
-                            if _res is None:
-                                continue
-                            _yte = _res["y_test_actual"]
-                            _ytp = _res["y_test_pred"]
-                            _oos_rmse = float(np.sqrt(np.mean((_yte - _ytp) ** 2))) if len(_yte) > 0 else np.nan
-                            _tac_coefs = [
-                                (f, float(c))
-                                for f, c in zip(_res["features"], _res["coefs"])
-                                if f in _res.get("tactic_cols", [])
-                            ]
-                            _coef_str = " | ".join(f"{f}: {c:.3f}" for f, c in _tac_coefs)
-                            all_rows.append({
-                                "iter_num":     _cfg["num"],
-                                "Iteration":    _cfg["label"],
-                                "State":        _entity,
-                                "Channel":      _ch,
-                                "MAPE":         round(float(_res["MAPE"]), 2),
-                                "R.Sq":         round(float(_res["R2"]), 4),
-                                "RMSE":         round(float(_res["RMSE"]), 2),
-                                "OOS RMSE":     round(_oos_rmse, 2) if not np.isnan(_oos_rmse) else np.nan,
-                                "Coefficients": _coef_str,
-                                "_result":      _res,
-                                "_state":       _entity,
-                                "_channel":     _ch,
-                            })
-            st.session_state["v6_all"] = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
+                        if _res is None:
+                            continue
+                        _yte = _res["y_test_actual"]
+                        _ytp = _res["y_test_pred"]
+                        _oos_rmse = float(np.sqrt(np.mean((_yte - _ytp) ** 2))) if len(_yte) > 0 else np.nan
+                        _tac_coefs = [
+                            (f, float(c))
+                            for f, c in zip(_res["features"], _res["coefs"])
+                            if f in _res.get("tactic_cols", [])
+                        ]
+                        _coef_str = " | ".join(f"{f}: {c:.3f}" for f, c in _tac_coefs)
+                        all_rows.append({
+                            "iter_num": _cfg["num"],
+                            "Iteration": _cfg["label"],
+                            "_state": _state,
+                            "_channel": _ch,
+                            "MAPE": round(float(_res["MAPE"]), 2),
+                            "R.Sq": round(float(_res["R2"]), 4),
+                            "RMSE": round(float(_res["RMSE"]), 2),
+                            "OOS RMSE": round(_oos_rmse, 2) if not np.isnan(_oos_rmse) else np.nan,
+                            "Coefficients": _coef_str,
+                            "_result": _res,
+                        })
+        st.session_state["v6_all"] = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
 
     all_results: pd.DataFrame | None = st.session_state.get("v6_all")
-
     if all_results is None or all_results.empty:
-        st.info("Set filters above and click **▶ Run** to compute configurations.")
+        st.info("Click **▶ Run All** to compute all 64 configurations.")
         return
 
     sub_tabs = st.tabs([
-        "📊 Summary Table",
+        "📊 Diagnostic Table",
         "📈 Actual vs Predicted",
         "🔍 Coefficients",
         "✅ Validate vs Offline",
     ])
 
-    # ---- Sub-tab 1: Summary Table -------------------------------------
+    # ---- Sub-tab 1: Hierarchical Diagnostic Table ---------------------
     with sub_tabs[0]:
-        disp_cols = ["Iteration", "State", "Channel", "MAPE", "R.Sq", "RMSE", "OOS RMSE", "Coefficients"]
-        disp_df = (
-            all_results[["iter_num"] + disp_cols]
-            .sort_values(["iter_num", "State", "Channel"])
-            .drop(columns=["iter_num"])
-            .reset_index(drop=True)
-        )
+        # Build sparse hierarchical rows: Iteration > State > Channel
+        _ch_display = {"PHYSICAL": "Physical", "DIGITAL": "Digital"}
+        _table_rows = []
+        for _cfg in V6_ITERATIONS:
+            _first_iter = True
+            for _state in _V6_FIXED_STATES:
+                _first_state = True
+                for _ch in ["PHYSICAL", "DIGITAL"]:
+                    _m = all_results[
+                        (all_results["iter_num"] == _cfg["num"]) &
+                        (all_results["_state"] == _state) &
+                        (all_results["_channel"] == _ch)
+                    ]
+                    if _m.empty:
+                        _mape, _rsq, _rmse, _oos, _coef = np.nan, np.nan, np.nan, np.nan, ""
+                    else:
+                        _r = _m.iloc[0]
+                        _mape, _rsq, _rmse, _oos, _coef = (
+                            _r["MAPE"], _r["R.Sq"], _r["RMSE"], _r["OOS RMSE"], _r["Coefficients"]
+                        )
+                    _table_rows.append({
+                        "Iteration": _cfg["label"] if _first_iter else "",
+                        "State":     _state if _first_state else "",
+                        "Channel":   _ch_display[_ch],
+                        "MAPE":      _mape,
+                        "R.Sq":      _rsq,
+                        "RMSE":      _rmse,
+                        "OOS RMSE":  _oos,
+                        "Coefficients": _coef,
+                    })
+                    _first_iter = False
+                    _first_state = False
+
+        _tbl_df = pd.DataFrame(_table_rows)
         st.dataframe(
-            disp_df,
+            _tbl_df,
             use_container_width=True,
+            height=min(35 * len(_table_rows) + 38, 900),
             column_config={
-                "MAPE":     st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
-                "R.Sq":     st.column_config.NumberColumn("R²",       format="%.4f"),
-                "RMSE":     st.column_config.NumberColumn("RMSE",     format="%.2f"),
-                "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
+                "Iteration":    st.column_config.TextColumn("Iteration", width="large"),
+                "State":        st.column_config.TextColumn("State",     width="small"),
+                "Channel":      st.column_config.TextColumn("Channel",   width="small"),
+                "MAPE":         st.column_config.NumberColumn("MAPE (%)",  format="%.2f"),
+                "R.Sq":         st.column_config.NumberColumn("R²",        format="%.4f"),
+                "RMSE":         st.column_config.NumberColumn("RMSE",      format="%.2f"),
+                "OOS RMSE":     st.column_config.NumberColumn("OOS RMSE",  format="%.2f"),
+                "Coefficients": st.column_config.TextColumn("Coefficients", width="large"),
             },
             hide_index=True,
         )
         st.caption(
-            "OOS RMSE = out-of-sample RMSE on first 8 weeks of 2026. "
-            "Coefficients shown are tactic-only (scaled)."
+            "Iteration shown only on first row of each group. "
+            "State shown only on first row of each state. "
+            "OOS RMSE = out-of-sample RMSE on first 8 weeks of 2026."
         )
 
     # ---- Sub-tab 2: Actual vs Predicted -------------------------------
     with sub_tabs[1]:
-        _avp_states = sorted(all_results["_state"].unique().tolist())
-        _avp_channels = sorted(all_results["_channel"].unique().tolist())
-        _avp_iters = all_results.sort_values("iter_num")["Iteration"].unique().tolist()
+        _avp_iters = [cfg["label"] for cfg in V6_ITERATIONS]
         ac1, ac2, ac3 = st.columns(3)
         with ac1:
-            sel_state_avp = st.selectbox("State", _avp_states, key="v6_avp_state")
+            sel_state_avp = st.selectbox("State", _V6_FIXED_STATES, key="v6_avp_state")
         with ac2:
-            sel_ch_avp = st.selectbox("Channel", _avp_channels, key="v6_avp_ch")
+            sel_ch_avp = st.selectbox("Channel", ["DIGITAL", "PHYSICAL"], key="v6_avp_ch")
         with ac3:
             sel_iter_avp = st.selectbox("Iteration", _avp_iters, key="v6_avp_iter")
 
@@ -2141,8 +2113,8 @@ def render_tab_mmm_v6() -> None:
             te_labels = [f"{int(r[0])}-W{int(r[1]):02d}" for r in res_avp["test_periods"]]
             all_labels = tr_labels + te_labels
             n_tr, n_te = len(tr_labels), len(te_labels)
-            x_tr  = list(range(n_tr))
-            x_te  = list(range(n_tr, n_tr + n_te))
+            x_tr = list(range(n_tr))
+            x_te = list(range(n_tr, n_tr + n_te))
             x_all = list(range(n_tr + n_te))
 
             fig_avp6 = go.Figure()
@@ -2158,7 +2130,7 @@ def render_tab_mmm_v6() -> None:
                 fig_avp6.add_vline(x=n_tr - 0.5, line_dash="dot", line_color="gray",
                                    annotation_text="Train | Test", annotation_position="top right")
             fig_avp6.update_layout(
-                title=f"Actual vs Predicted — {sel_state_avp} {sel_ch_avp} — {sel_iter_avp}",
+                title=f"Actual vs Predicted — {sel_state_avp} {sel_ch_avp}",
                 xaxis=dict(title="Period", tickmode="array", tickvals=x_all,
                            ticktext=all_labels, tickangle=-90),
                 yaxis_title="NON_DM_APPLICATIONS", height=420,
@@ -2168,7 +2140,7 @@ def render_tab_mmm_v6() -> None:
 
             residuals6 = (
                 np.concatenate([res_avp["y_train_actual"], res_avp["y_test_actual"]]) -
-                np.concatenate([res_avp["y_train_pred"],   res_avp["y_test_pred"]])
+                np.concatenate([res_avp["y_train_pred"], res_avp["y_test_pred"]])
             )
             colors6 = ["#E45756" if r < 0 else "#4C78A8" for r in residuals6]
             fig_res6 = go.Figure(go.Bar(x=x_all, y=residuals6.tolist(), marker_color=colors6))
@@ -2176,19 +2148,19 @@ def render_tab_mmm_v6() -> None:
             if n_tr > 0:
                 fig_res6.add_vline(x=n_tr - 0.5, line_dash="dot", line_color="gray")
             fig_res6.update_layout(
-                title="Residuals (Actual − Predicted)",
-                xaxis=dict(title="Period", tickmode="array", tickvals=x_all,
-                           ticktext=all_labels, tickangle=-90),
-                yaxis_title="Residual", height=300,
+                title="Residuals",
+                xaxis=dict(tickmode="array", tickvals=x_all, ticktext=all_labels, tickangle=-90),
+                yaxis_title="Residual", height=280,
             )
             st.plotly_chart(fig_res6, use_container_width=True, key="v6_res_chart")
 
             _row6 = _match_avp.iloc[0]
-            _te_act6, _te_pred6 = res_avp["y_test_actual"], res_avp["y_test_pred"]
-            _te_mask6 = _te_act6 != 0
+            _te_mask6 = res_avp["y_test_actual"] != 0
             _te_mape6 = (
-                float(np.mean(np.abs((_te_act6[_te_mask6] - _te_pred6[_te_mask6]) / _te_act6[_te_mask6])) * 100)
-                if _te_mask6.any() else float("nan")
+                float(np.mean(np.abs(
+                    (res_avp["y_test_actual"][_te_mask6] - res_avp["y_test_pred"][_te_mask6])
+                    / res_avp["y_test_actual"][_te_mask6]
+                )) * 100) if _te_mask6.any() else float("nan")
             )
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Train R²",   f"{_row6['R.Sq']:.4f}")
@@ -2200,11 +2172,11 @@ def render_tab_mmm_v6() -> None:
     with sub_tabs[2]:
         cc1, cc2, cc3 = st.columns(3)
         with cc1:
-            sel_state_coef = st.selectbox("State", _avp_states, key="v6_coef_state")
+            sel_state_coef = st.selectbox("State", _V6_FIXED_STATES, key="v6_coef_state")
         with cc2:
-            sel_ch_coef = st.selectbox("Channel", _avp_channels, key="v6_coef_ch")
+            sel_ch_coef = st.selectbox("Channel", ["DIGITAL", "PHYSICAL"], key="v6_coef_ch")
         with cc3:
-            sel_iter_coef = st.selectbox("Iteration", _avp_iters, key="v6_coef_iter")
+            sel_iter_coef = st.selectbox("Iteration", [cfg["label"] for cfg in V6_ITERATIONS], key="v6_coef_iter")
 
         _match_coef = all_results[
             (all_results["_state"] == sel_state_coef) &
@@ -2226,47 +2198,37 @@ def render_tab_mmm_v6() -> None:
                     x=list(sc), y=list(sf), orientation="h", marker_color=list(scol),
                 ))
                 fig_coef6.update_layout(
-                    title=f"Coefficients — {sel_state_coef} {sel_ch_coef} — {sel_iter_coef}",
+                    title=f"Coefficients — {sel_state_coef} {sel_ch_coef}",
                     xaxis_title="Coefficient Value", yaxis_title="Feature",
                     height=max(400, len(feats6) * 22), yaxis=dict(autorange="reversed"),
                 )
                 st.plotly_chart(fig_coef6, use_container_width=True, key="v6_coef_chart")
                 coef_tbl6 = pd.DataFrame({
-                    "Feature": res_coef["features"],
-                    "Coefficient": [round(float(c), 6) for c in res_coef["coefs"]],
+                    "Feature": feats6,
+                    "Coefficient": [round(float(c), 6) for c in coefs6],
                     "Type": types6,
                 })
                 st.dataframe(coef_tbl6, use_container_width=True, hide_index=True)
-                st.caption("OLS coefficients on scaled predictors (MinMax on tactic columns).")
+                st.caption("OLS coefficients on MinMax-scaled tactic predictors.")
 
     # ---- Sub-tab 4: Validate vs Offline --------------------------------
     with sub_tabs[3]:
-        st.markdown(
-            "**Offline validation** compares iterations 1 and 2 (weekly / bi-weekly baselines) "
-            "against pre-computed diagnostics. A separate channel selector is provided; "
-            "iterations 3–8 have no offline baseline."
-        )
-        _val_ch = st.selectbox("Channel for validation", _avp_channels, key="v6_val_ch")
-        _val_state = st.selectbox("State for validation", _avp_states, key="v6_val_state")
+        st.markdown("Iterations 1 and 2 can be validated against pre-computed offline diagnostics.")
+        _val_ch = st.selectbox("Channel", ["DIGITAL", "PHYSICAL"], key="v6_val_ch")
+        _val_state = st.selectbox("State", _V6_FIXED_STATES, key="v6_val_state")
 
         _diag_path6 = DIAGNOSTICS_DIGITAL_PATH if _val_ch == "DIGITAL" else DIAGNOSTICS_PHYSICAL_PATH
         if not _diag_path6.exists():
-            st.warning(
-                "Offline diagnostics file not found. Expected: "
-                "consolidated_model_diagnostics_digital.xlsx / "
-                "consolidated_model_diagnostics_physical.xlsx"
-            )
+            st.warning("Offline diagnostics file not found.")
         else:
             try:
                 _offline6 = load_offline_diagnostics(_val_ch)
             except Exception as exc:
                 st.error(f"Failed to load offline diagnostics: {exc}")
                 return
-
             _baseline_map = {1: "weekly", 2: "f_dummy"}
             _metric_cols6 = ["R2", "AdjR2", "Test_R2", "AIC", "BIC"]
             _cmp_rows6, _match_count6 = [], 0
-
             for _iter_num, _df_fam in _baseline_map.items():
                 _iter_label = next((c["label"] for c in V6_ITERATIONS if c["num"] == _iter_num), "")
                 _live_rows = all_results[
@@ -2283,47 +2245,37 @@ def render_tab_mmm_v6() -> None:
                     & (_offline6.get("dummy_family", pd.Series(dtype=str)) == _df_fam)
                 )
                 _matched6 = _offline6[_mask6]
-                _row_data6: dict = {"Iteration": _iter_label, "Config": f"OLS | {_df_fam}"}
+                _row_data6: dict = {"Iteration": _iter_label}
                 _all_match6 = True
                 for _m in _metric_cols6:
-                    _live_val = _live_res.get(_m, np.nan) if isinstance(_live_res, dict) else np.nan
-                    _off_val = float(_matched6.iloc[0][_m]) if not _matched6.empty and _m in _matched6.columns else np.nan
-                    _diff = abs(_live_val - _off_val) if not (np.isnan(float(_live_val)) or np.isnan(float(_off_val))) else np.nan
-                    _row_data6[f"{_m}_live"]    = round(float(_live_val), 6) if not np.isnan(float(_live_val)) else np.nan
-                    _row_data6[f"{_m}_offline"] = round(float(_off_val),  6) if not np.isnan(float(_off_val))  else np.nan
-                    _row_data6[f"{_m}_diff"]    = round(float(_diff), 6) if _diff is not None and not np.isnan(_diff) else np.nan
-                    if _diff is None or np.isnan(_diff) or _diff >= 0.01:
+                    _lv = _live_res.get(_m, np.nan) if isinstance(_live_res, dict) else np.nan
+                    _ov = float(_matched6.iloc[0][_m]) if not _matched6.empty and _m in _matched6.columns else np.nan
+                    _dv = abs(_lv - _ov) if not (np.isnan(float(_lv)) or np.isnan(float(_ov))) else np.nan
+                    _row_data6[f"{_m}_live"] = round(float(_lv), 6) if not np.isnan(float(_lv)) else np.nan
+                    _row_data6[f"{_m}_offline"] = round(float(_ov), 6) if not np.isnan(float(_ov)) else np.nan
+                    _row_data6[f"{_m}_diff"] = round(float(_dv), 6) if _dv is not None and not np.isnan(_dv) else np.nan
+                    if _dv is None or np.isnan(_dv) or _dv >= 0.01:
                         _all_match6 = False
                 if _all_match6:
                     _match_count6 += 1
                 _cmp_rows6.append(_row_data6)
-
             if _cmp_rows6:
-                if _match_count6 == len(_cmp_rows6):
-                    st.success(f"✅ Both baseline configurations matched within tolerance for {_val_state} {_val_ch}.")
-                else:
-                    st.warning(f"⚠ {len(_cmp_rows6) - _match_count6} config(s) differ.")
+                st.success(f"✅ {_match_count6}/{len(_cmp_rows6)} baseline(s) matched.") if _match_count6 == len(_cmp_rows6) else st.warning(f"⚠ {len(_cmp_rows6) - _match_count6} differ.")
                 _cmp_df6 = pd.DataFrame(_cmp_rows6)
                 for _m in _metric_cols6:
-                    with st.expander(f"**{_m}**", expanded=(_m in ["R2", "Test_R2"])):
-                        _sub6 = _cmp_df6[["Iteration", "Config", f"{_m}_live", f"{_m}_offline", f"{_m}_diff"]].copy()
-                        _sub6.columns = ["Iteration", "Config", "Live", "Offline", "Diff"]
-
-                        def _cd6(_val):
-                            if _val is None or (isinstance(_val, float) and np.isnan(_val)):
+                    with st.expander(f"**{_m}**", expanded=(_m == "R2")):
+                        _sub6 = _cmp_df6[["Iteration", f"{_m}_live", f"{_m}_offline", f"{_m}_diff"]].copy()
+                        _sub6.columns = ["Iteration", "Live", "Offline", "Diff"]
+                        def _cd6(_v):
+                            if _v is None or (isinstance(_v, float) and np.isnan(_v)):
                                 return "color: gray"
-                            return "color: green" if abs(_val) < 0.001 else "color: orange" if abs(_val) < 0.01 else "color: red"
-
-                        st.dataframe(_sub6.style.applymap(_cd6, subset=["Diff"]),
-                                     use_container_width=True, hide_index=True)
-
+                            return "color: green" if abs(_v) < 0.001 else "color: orange" if abs(_v) < 0.01 else "color: red"
+                        st.dataframe(_sub6.style.applymap(_cd6, subset=["Diff"]), use_container_width=True, hide_index=True)
         st.markdown("---")
-        st.markdown("**Iterations 3–8 — new variants (no offline baseline)**")
-        _nv_rows = [
-            {"Iteration": cfg["label"], "Status": "No offline baseline — live metrics only"}
-            for cfg in V6_ITERATIONS if cfg["num"] not in {1, 2}
-        ]
-        st.dataframe(pd.DataFrame(_nv_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame([
+            {"Iteration": c["label"], "Status": "No offline baseline"}
+            for c in V6_ITERATIONS if c["num"] not in {1, 2}
+        ]), use_container_width=True, hide_index=True)
 
 
 # ---------------------------------------------------------------------------

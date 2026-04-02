@@ -993,7 +993,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 3,
-        "label": "Bi-weekly + Prescreen split (50/25/25, wks 0,+1,+2)",
+        "label": "Bi-weekly columns + Pre-screen spend split into (50 25, 25) across weeks 0, 1, 2",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag", "weights": [0.50, 0.25, 0.25], "lags": [0, 1, 2]},
         "add_interaction": False,
@@ -1001,7 +1001,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 4,
-        "label": "Bi-weekly + Prescreen split (25/50/25, wks -1,0,+1)",
+        "label": "Bi-weekly columns + Pre-screen spend split into (25, 50, 25) across weeks -1, 0, 1",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": False,
@@ -1009,7 +1009,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 5,
-        "label": "Bi-weekly + Prescreen split (25/50/25) + SQRT",
+        "label": "Bi-weekly columns + Pre-screen spend split into (25, 50, 25) across weeks -1, 0, 1 + SQRT transformation on Prescreen",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag_sqrt", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": False,
@@ -1017,7 +1017,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 6,
-        "label": "Bi-weekly + Prescreen split (25/50/25) + LOG",
+        "label": "Bi-weekly columns + Pre-screen spend split into (25, 50, 25) across weeks -1, 0, 1 + LOG transformation on Prescreen",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag_log", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": False,
@@ -1025,7 +1025,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 7,
-        "label": "Bi-weekly + Prescreen split (25/50/25) + LOG + Prescreen×DSP",
+        "label": "Bi-weekly columns + Pre-screen spend split into (25, 50, 25) across weeks -1, 0, 1 + LOG transformation on Prescreen + Interaction effects Prescreen and DSP",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag_log", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": True,
@@ -1033,7 +1033,7 @@ V6_ITERATIONS = [
     },
     {
         "num": 8,
-        "label": "Bi-weekly + Prescreen split (25/50/25) + LOG + Prescreen×DSP − Prescreen main",
+        "label": "Bi-weekly columns + Pre-screen spend split into (25, 50, 25) across weeks -1, 0, 1 + LOG transformation on Prescreen + Interaction effects Prescreen and DSP + Minus Prescreen",
         "dummy_family": "f_dummy",
         "prescreen_transform": {"type": "lag_log", "weights": [0.25, 0.50, 0.25], "lags": [-1, 0, 1]},
         "add_interaction": True,
