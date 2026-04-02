@@ -1994,7 +1994,7 @@ def render_tab_mmm_v6() -> None:
                             "_state": _state,
                             "_channel": _ch,
                             "MAPE": round(float(_res["MAPE"]), 2),
-                            "R.Sq": round(float(_res["R2"]), 4),
+                            "R. Sq": round(float(_res["R2"]), 4),
                             "RMSE": round(float(_res["RMSE"]), 2),
                             "OOS RMSE": round(_oos_rmse, 2) if not np.isnan(_oos_rmse) else np.nan,
                             "Coefficients": _coef_str,
@@ -2034,14 +2034,14 @@ def render_tab_mmm_v6() -> None:
                     else:
                         _r = _m.iloc[0]
                         _mape, _rsq, _rmse, _oos, _coef = (
-                            _r["MAPE"], _r["R.Sq"], _r["RMSE"], _r["OOS RMSE"], _r["Coefficients"]
+                            _r["MAPE"], _r["R. Sq"], _r["RMSE"], _r["OOS RMSE"], _r["Coefficients"]
                         )
                     _table_rows.append({
                         "Iteration": _cfg["label"] if _first_iter else "",
                         "State":     _state if _first_state else "",
                         "Channel":   _ch_display[_ch],
                         "MAPE":      _mape,
-                        "R.Sq":      _rsq,
+                        "R. Sq":      _rsq,
                         "RMSE":      _rmse,
                         "OOS RMSE":  _oos,
                         "Coefficients": _coef,
@@ -2059,7 +2059,7 @@ def render_tab_mmm_v6() -> None:
                 "State":        st.column_config.TextColumn("State",     width="small"),
                 "Channel":      st.column_config.TextColumn("Channel",   width="small"),
                 "MAPE":         st.column_config.NumberColumn("MAPE (%)",  format="%.2f"),
-                "R.Sq":         st.column_config.NumberColumn("R²",        format="%.4f"),
+                "R. Sq":         st.column_config.NumberColumn("R²",        format="%.4f"),
                 "RMSE":         st.column_config.NumberColumn("RMSE",      format="%.2f"),
                 "OOS RMSE":     st.column_config.NumberColumn("OOS RMSE",  format="%.2f"),
                 "Coefficients": st.column_config.TextColumn("Coefficients", width="large"),
@@ -2067,9 +2067,10 @@ def render_tab_mmm_v6() -> None:
             hide_index=True,
         )
         st.caption(
-            "Iteration shown only on first row of each group. "
-            "State shown only on first row of each state. "
-            "OOS RMSE = out-of-sample RMSE on first 8 weeks of 2026."
+            "The table groups rows by Iteration → State → Channel. "
+            "When a cell in Iteration or State is blank, it belongs to the same group as the last non-blank value above it. "
+            "OOS RMSE = prediction error on the first 8 weeks of 2026 (data the model never trained on). "
+            "Lower MAPE/RMSE/OOS RMSE = better fit. Higher R² = more variance explained."
         )
 
     # ---- Sub-tab 2: Actual vs Predicted -------------------------------
@@ -2268,6 +2269,239 @@ def render_tab_mmm_v6() -> None:
 st.title("Marketing Analytics and Modeling")
 st.caption("Channel-specific analysis and regression for DIGITAL and PHYSICAL applications.")
 
+# =============================================================================
+# Version 7 — Metric Calculator (step-by-step breakdown)
+# =============================================================================
+def render_tab_mmm_v7() -> None:
+    render_version_intro(
+        "Version 7 — Metric Calculator",
+        [
+            "Pick a State, Channel, and Iteration to see exactly how each metric is computed.",
+            "Shows week-by-week Actual vs Predicted, residuals, and the formula behind MAPE, R², RMSE, OOS RMSE, and Coefficients.",
+        ],
+        note="Uses the same OLS pipeline as V6. Train: 2024–2025. OOS test: first 8 weeks of 2026.",
+    )
+
+    from utils import MARKETING_SPEND_PATH as _msp7, DM_DATA_PATH as _dmp7, ORIGINATIONS_V5_PATH as _op7
+    from data_processing import fit_v6_iteration as _fit_v7, V6_ITERATIONS as _iters7
+
+    missing = [n for p, n in [(_msp7, _msp7.name), (_dmp7, _dmp7.name), (_op7, _op7.name)] if not p.exists()]
+    if missing:
+        st.error(f"Missing raw data files: {', '.join(missing)}")
+        return
+
+    c1, c2, c3, c4 = st.columns([2, 1, 3, 1])
+    with c1:
+        v7_state = st.selectbox("State", _V6_FIXED_STATES, key="v7_state")
+    with c2:
+        v7_ch = st.selectbox("Channel", ["DIGITAL", "PHYSICAL"], key="v7_ch")
+    with c3:
+        _iter_labels = [f"{cfg['num']}. {cfg['label']}" for cfg in _iters7]
+        v7_iter_label = st.selectbox("Iteration", _iter_labels, key="v7_iter")
+        v7_cfg = _iters7[_iter_labels.index(v7_iter_label)]
+    with c4:
+        st.write("")
+        v7_run = st.button("▶ Calculate", key="v7_run")
+
+    if v7_run:
+        try:
+            _frame = cached_build_modeling_frame(v7_ch)
+        except Exception as exc:
+            st.error(f"Could not build modeling frame: {exc}")
+            return
+        _edf = _frame[_frame["STATE_CD"] == v7_state].copy()
+        _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+        _res = _fit_v7(
+            _edf, v7_ch,
+            dummy_family=v7_cfg["dummy_family"],
+            prescreen_transform=v7_cfg["prescreen_transform"],
+            add_interaction=v7_cfg["add_interaction"],
+            drop_prescreen=v7_cfg["drop_prescreen"],
+            log_tactics=v7_cfg.get("log_tactics"),
+        )
+        if _res is None:
+            st.warning("Model could not be fitted for this selection.")
+            return
+        st.session_state["v7_result"] = _res
+        st.session_state["v7_label"] = f"Iter {v7_cfg['num']} | {v7_state} | {v7_ch}"
+
+    _res = st.session_state.get("v7_result")
+    if _res is None:
+        st.info("Select a State, Channel, and Iteration then click **▶ Calculate**.")
+        return
+
+    _label = st.session_state.get("v7_label", "")
+    st.markdown(f"### Results: {_label}")
+
+    # ------------------------------------------------------------------ #
+    # Summary metrics row
+    # ------------------------------------------------------------------ #
+    y_tr = _res["y_train_actual"]
+    yh_tr = _res["y_train_pred"]
+    y_te = _res["y_test_actual"]
+    yh_te = _res["y_test_pred"]
+    oos_rmse = float(np.sqrt(np.mean((y_te - yh_te) ** 2))) if len(y_te) > 0 else np.nan
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("MAPE (train)", f"{_res['MAPE']:.2f}%")
+    mc2.metric("R² (train)", f"{_res['R2']:.4f}")
+    mc3.metric("RMSE (train)", f"{_res['RMSE']:.2f}")
+    mc4.metric("OOS RMSE (test)", f"{oos_rmse:.2f}" if not np.isnan(oos_rmse) else "N/A")
+
+    st.divider()
+
+    calc_tabs = st.tabs([
+        "📐 MAPE",
+        "📐 R²",
+        "📐 RMSE",
+        "📐 OOS RMSE",
+        "📐 Coefficients",
+    ])
+
+    # ---- MAPE --------------------------------------------------------- #
+    with calc_tabs[0]:
+        st.markdown("""
+**Formula:**
+> MAPE = mean( |Actual − Predicted| / |Actual| ) × 100
+>
+> Only weeks where Actual ≠ 0 are included.
+""")
+        _tr_periods = _res["train_periods"]
+        _mape_rows = []
+        for i, (yr, wk) in enumerate(_tr_periods):
+            act, pred = float(y_tr[i]), float(yh_tr[i])
+            err = abs(act - pred)
+            pct = (err / abs(act) * 100) if act != 0 else None
+            _mape_rows.append({
+                "Year": int(yr), "Week": int(wk),
+                "Actual": round(act, 2), "Predicted": round(pred, 2),
+                "| Actual − Pred |": round(err, 2),
+                "% Error ( ÷ Actual × 100)": round(pct, 2) if pct is not None else "excluded (Actual=0)",
+            })
+        _mape_df = pd.DataFrame(_mape_rows)
+        st.dataframe(_mape_df, hide_index=True, use_container_width=True)
+        _valid = [r["% Error ( ÷ Actual × 100)"] for r in _mape_rows if isinstance(r["% Error ( ÷ Actual × 100)"], float)]
+        st.info(f"Sum of % errors = **{sum(_valid):.2f}** ÷ **{len(_valid)} weeks** = **MAPE {np.mean(_valid):.2f}%**")
+
+    # ---- R² ----------------------------------------------------------- #
+    with calc_tabs[1]:
+        st.markdown("""
+**Formula:**
+> R² = 1 − SS_res / SS_tot
+>
+> SS_res = Σ (Actual − Predicted)²  ← how much the model misses
+> SS_tot = Σ (Actual − Mean(Actual))²  ← total variability in the data
+>
+> R² = 1 means perfect fit. R² = 0 means the model is no better than just predicting the mean.
+""")
+        _mean_y = float(np.mean(y_tr))
+        _ss_res = float(np.sum((y_tr - yh_tr) ** 2))
+        _ss_tot = float(np.sum((y_tr - _mean_y) ** 2))
+        _r2_calc = 1 - _ss_res / _ss_tot if _ss_tot != 0 else np.nan
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("Mean(Actual)", f"{_mean_y:.2f}")
+        rc2.metric("SS_res", f"{_ss_res:,.2f}")
+        rc3.metric("SS_tot", f"{_ss_tot:,.2f}")
+        st.info(f"R² = 1 − ({_ss_res:,.2f} ÷ {_ss_tot:,.2f}) = **{_r2_calc:.6f}**")
+        _r2_rows = []
+        for i, (yr, wk) in enumerate(_tr_periods):
+            act, pred = float(y_tr[i]), float(yh_tr[i])
+            _r2_rows.append({
+                "Year": int(yr), "Week": int(wk),
+                "Actual": round(act, 2), "Predicted": round(pred, 2),
+                "(Actual − Pred)²": round((act - pred) ** 2, 2),
+                "(Actual − Mean)²": round((act - _mean_y) ** 2, 2),
+            })
+        st.dataframe(pd.DataFrame(_r2_rows), hide_index=True, use_container_width=True)
+
+    # ---- RMSE --------------------------------------------------------- #
+    with calc_tabs[2]:
+        st.markdown("""
+**Formula:**
+> RMSE = √ mean( (Actual − Predicted)² )
+>
+> It's in the same units as Applications — lower is better.
+""")
+        _sq_errs = (y_tr - yh_tr) ** 2
+        _mse = float(np.mean(_sq_errs))
+        _rmse_calc = float(np.sqrt(_mse))
+        rc1, rc2 = st.columns(2)
+        rc1.metric("Mean Squared Error", f"{_mse:,.4f}")
+        rc2.metric("RMSE = √MSE", f"{_rmse_calc:.4f}")
+        _rmse_rows = []
+        for i, (yr, wk) in enumerate(_tr_periods):
+            act, pred = float(y_tr[i]), float(yh_tr[i])
+            sq_err = (act - pred) ** 2
+            _rmse_rows.append({
+                "Year": int(yr), "Week": int(wk),
+                "Actual": round(act, 2), "Predicted": round(pred, 2),
+                "Error": round(act - pred, 2),
+                "Squared Error": round(sq_err, 2),
+            })
+        st.dataframe(pd.DataFrame(_rmse_rows), hide_index=True, use_container_width=True)
+        st.info(f"Sum of squared errors = {sum(r['Squared Error'] for r in _rmse_rows):,.2f} ÷ {len(_rmse_rows)} weeks → MSE = {_mse:,.4f} → RMSE = **{_rmse_calc:.4f}**")
+
+    # ---- OOS RMSE ----------------------------------------------------- #
+    with calc_tabs[3]:
+        st.markdown("""
+**Formula:** Same as RMSE but on the **test set** (first 8 weeks of 2026).
+> OOS RMSE = √ mean( (Actual − Predicted)² )  — computed on weeks the model never trained on.
+>
+> This is the most important metric: it shows whether the model generalises beyond the training data.
+""")
+        if len(y_te) == 0:
+            st.warning("No test data available for this selection.")
+        else:
+            _te_periods = _res["test_periods"]
+            _oos_rows = []
+            for i, (yr, wk) in enumerate(_te_periods):
+                act, pred = float(y_te[i]), float(yh_te[i])
+                sq_err = (act - pred) ** 2
+                _oos_rows.append({
+                    "Year": int(yr), "Week": int(wk),
+                    "Actual": round(act, 2), "Predicted": round(pred, 2),
+                    "Error": round(act - pred, 2),
+                    "Squared Error": round(sq_err, 2),
+                })
+            _oos_mse = float(np.mean([(r["Squared Error"]) for r in _oos_rows]))
+            _oos_rmse_calc = float(np.sqrt(_oos_mse))
+            st.dataframe(pd.DataFrame(_oos_rows), hide_index=True, use_container_width=True)
+            st.info(f"Sum of squared errors = {sum(r['Squared Error'] for r in _oos_rows):,.2f} ÷ {len(_oos_rows)} test weeks → MSE = {_oos_mse:,.4f} → OOS RMSE = **{_oos_rmse_calc:.4f}**")
+
+    # ---- Coefficients ------------------------------------------------- #
+    with calc_tabs[4]:
+        st.markdown("""
+**How OLS coefficients work:**
+> The model fits:  Predicted = β₁·X₁ + β₂·X₂ + … (no intercept)
+>
+> Tactic columns (Prescreen, DSP, etc.) are **MinMax scaled** to [0, 1] before fitting,
+> so coefficients are on the same scale and comparable across tactics.
+> Seasonal dummy columns are unscaled (already 0 or 1).
+>
+> A **positive coefficient** means more spend → more applications.
+> A **negative coefficient** is a warning sign (multicollinearity or overfitting).
+""")
+        _coef_rows = []
+        for feat, coef in zip(_res["features"], _res["coefs"]):
+            _is_tactic = feat in _res.get("tactic_cols", [])
+            _coef_rows.append({
+                "Feature": feat,
+                "Type": "Tactic (MinMax scaled)" if _is_tactic else "Seasonal dummy",
+                "Coefficient": round(float(coef), 6),
+                "Direction": "Positive ✓" if coef > 0 else "Negative ⚠",
+            })
+        st.dataframe(pd.DataFrame(_coef_rows), hide_index=True, use_container_width=True)
+        _tac_coefs = [(r["Feature"], r["Coefficient"]) for r in _coef_rows if r["Type"].startswith("Tactic")]
+        if _tac_coefs:
+            st.markdown("**Tactic coefficient summary (scaled values):**")
+            for f, c in sorted(_tac_coefs, key=lambda x: -abs(x[1])):
+                bar = "█" * min(int(abs(c) / max(abs(cc) for _, cc in _tac_coefs) * 20), 20)
+                st.text(f"  {f:<20} {c:+.4f}  {bar}")
+
+
+# =============================================================================
+# Tab layout
+# =============================================================================
 tabs = st.tabs([
     "📊 Marketing Spend EDA",
     "📈 Originations EDA",
@@ -2277,6 +2511,7 @@ tabs = st.tabs([
     "🧱 Marketing Analysis V4",
     "🔬 Marketing Analysis V5",
     "📐 Marketing Analysis V6",
+    "🧮 Metric Calculator V7",
 ])
 
 with tabs[0]:
@@ -2302,3 +2537,6 @@ with tabs[6]:
 
 with tabs[7]:
     render_tab_mmm_v6()
+
+with tabs[8]:
+    render_tab_mmm_v7()
