@@ -19,6 +19,7 @@ from data_processing import (
     build_application_series,
     build_channel_comparison_table,
     build_modeling_frame,
+    build_v7_modeling_frame,
     build_product_spend_series,
     build_tactic_time_series,
     exclude_direct_mail_rows,
@@ -209,6 +210,11 @@ def auto_load_modeling(path: str, time_grain: str = "Weekly"):
 @st.cache_data(show_spinner="Building modeling frame from raw files…")
 def cached_build_modeling_frame(channel: str, product: str = "") -> pd.DataFrame:
     return build_modeling_frame(channel, product or None)
+
+
+@st.cache_data(show_spinner="Building V7 NON-DM modeling frame…")
+def cached_build_v7_modeling_frame(channel: str) -> pd.DataFrame:
+    return build_v7_modeling_frame(channel)
 
 
 @st.cache_data(show_spinner=False)
@@ -2294,18 +2300,23 @@ def render_tab_mmm_v7() -> None:
     render_version_intro(
         "Version 7 — Metric Calculator",
         [
-            "Pick a State, Channel, and Iteration to see exactly how each metric is computed.",
+            "Uses the updated NON-DM workflow, where Direct Mail applications are removed using `DM_Negative_Differences.xlsx`.",
+            "Pick a State, Channel, and Iteration to see exactly how each metric is computed on the NON_DM_APPLICATIONS target.",
             "Shows week-by-week Actual vs Predicted, residuals, and the formula behind MAPE, R², RMSE, OOS RMSE, and Coefficients.",
         ],
-        note="Uses the same OLS pipeline as V6. Train: 2024–2025. OOS test: first 8 weeks of 2026.",
+        note="Uses the same OLS iteration logic as V6, but with the updated NON_DM_APPLICATIONS source. Train: 2024–2025. OOS test: first 8 weeks of 2026.",
     )
 
-    from utils import MARKETING_SPEND_PATH as _msp7, DM_DATA_PATH as _dmp7, ORIGINATIONS_V5_PATH as _op7
-    from data_processing import fit_v6_iteration as _fit_v7, V6_ITERATIONS as _iters7
+    from utils import MARKETING_SPEND_PATH as _msp7
+    from data_processing import (
+        DM_DIFF_PATH as _dm_diff7,
+        V6_ITERATIONS as _iters7,
+        fit_v6_iteration as _fit_v7,
+    )
 
-    missing = [n for p, n in [(_msp7, _msp7.name), (_dmp7, _dmp7.name), (_op7, _op7.name)] if not p.exists()]
+    missing = [n for p, n in [(_msp7, _msp7.name), (_dm_diff7, _dm_diff7.name)] if not p.exists()]
     if missing:
-        st.error(f"Missing raw data files: {', '.join(missing)}")
+        st.error(f"Missing V7 input files: {', '.join(missing)}")
         return
 
     c1, c2, c3, c4 = st.columns([2, 1, 3, 1])
@@ -2323,9 +2334,9 @@ def render_tab_mmm_v7() -> None:
 
     if v7_run:
         try:
-            _frame = cached_build_modeling_frame(v7_ch)
+            _frame = cached_build_v7_modeling_frame(v7_ch)
         except Exception as exc:
-            st.error(f"Could not build modeling frame: {exc}")
+            st.error(f"Could not build the V7 NON-DM modeling frame: {exc}")
             return
         _edf = _frame[_frame["STATE_CD"] == v7_state].copy()
         _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
@@ -2335,6 +2346,7 @@ def render_tab_mmm_v7() -> None:
             return
         st.session_state["v7_result"] = _res
         st.session_state["v7_label"] = f"Iter {v7_cfg['num']} | {v7_state} | {v7_ch}"
+        st.session_state["v7_target_note"] = "Target = NON_DM_APPLICATIONS built from DM_Negative_Differences.xlsx"
 
     _res = st.session_state.get("v7_result")
     if _res is None:
@@ -2342,7 +2354,10 @@ def render_tab_mmm_v7() -> None:
         return
 
     _label = st.session_state.get("v7_label", "")
+    _target_note = st.session_state.get("v7_target_note", "")
     st.markdown(f"### Results: {_label}")
+    if _target_note:
+        st.caption(_target_note)
 
     # ------------------------------------------------------------------ #
     # Summary metrics row
