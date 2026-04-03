@@ -2037,6 +2037,124 @@ def render_tab_mmm_v6() -> None:
 
     # ---- Sub-tab 1: Hierarchical Diagnostic Table ---------------------
     with sub_tabs[0]:
+        _viz_df = all_results.copy()
+        _viz_df["combo"] = _viz_df["_state"] + " | " + _viz_df["_channel"]
+
+        _best_idx = (
+            _viz_df.sort_values(["OOS RMSE", "MAPE", "R. Sq"], ascending=[True, True, False])
+            .groupby(["_state", "_channel"], dropna=False)
+            .head(1)
+            .index
+        )
+        _best_combo_df = (
+            _viz_df.loc[_best_idx, ["_state", "_channel", "Iteration", "MAPE", "R. Sq", "OOS RMSE"]]
+            .sort_values(["_state", "_channel"])
+            .rename(columns={
+                "_state": "State",
+                "_channel": "Channel",
+                "Iteration": "Best Iteration",
+            })
+            .reset_index(drop=True)
+        )
+
+        _iter_summary = (
+            _viz_df.groupby(["iter_num", "Iteration"], dropna=False)
+            .agg(
+                avg_oos_rmse=("OOS RMSE", "mean"),
+                avg_mape=("MAPE", "mean"),
+                avg_rsq=("R. Sq", "mean"),
+            )
+            .reset_index()
+            .sort_values(["avg_oos_rmse", "avg_mape", "avg_rsq"], ascending=[True, True, False])
+        )
+        _best_overall = _iter_summary.iloc[0]
+
+        _channel_summary = (
+            _viz_df.groupby(["_channel", "iter_num", "Iteration"], dropna=False)
+            .agg(avg_oos_rmse=("OOS RMSE", "mean"))
+            .reset_index()
+            .sort_values(["_channel", "avg_oos_rmse"])
+        )
+        _best_digital = _channel_summary[_channel_summary["_channel"] == "DIGITAL"].iloc[0]
+        _best_physical = _channel_summary[_channel_summary["_channel"] == "PHYSICAL"].iloc[0]
+
+        _state_summary = (
+            _viz_df.groupby("_state", dropna=False)
+            .agg(avg_oos_rmse=("OOS RMSE", "mean"))
+            .reset_index()
+            .sort_values("avg_oos_rmse")
+        )
+        _best_state = _state_summary.iloc[0]
+
+        st.markdown("**Quick Read**")
+        qc1, qc2, qc3, qc4 = st.columns(4)
+        qc1.metric("Best Overall Iteration", str(_best_overall["Iteration"]))
+        qc2.metric("Best DIGITAL Iteration", str(_best_digital["Iteration"]))
+        qc3.metric("Best PHYSICAL Iteration", str(_best_physical["Iteration"]))
+        qc4.metric("Best State Avg OOS RMSE", f"{_best_state['_state']} ({_best_state['avg_oos_rmse']:.2f})")
+
+        st.caption(
+            "Lower OOS RMSE and MAPE are better. Higher R² is better. "
+            "These visuals summarize which iterations are strongest before the detailed table."
+        )
+
+        vc1, vc2 = st.columns([1.1, 1])
+        with vc1:
+            _heat = (
+                _viz_df.pivot_table(
+                    index="combo",
+                    columns="Iteration",
+                    values="OOS RMSE",
+                    aggfunc="mean",
+                )
+                .sort_index()
+            )
+            fig_heat_v6 = go.Figure(data=go.Heatmap(
+                z=_heat.values,
+                x=_heat.columns.tolist(),
+                y=_heat.index.tolist(),
+                colorscale="YlGnBu_r",
+                colorbar_title="OOS RMSE",
+                hovertemplate="State|Channel: %{y}<br>Iteration: %{x}<br>OOS RMSE: %{z:.2f}<extra></extra>",
+            ))
+            fig_heat_v6.update_layout(
+                title="OOS RMSE Heatmap by State and Channel",
+                height=max(380, 34 * len(_heat.index)),
+                margin=dict(l=10, r=10, t=40, b=10),
+            )
+            st.plotly_chart(fig_heat_v6, use_container_width=True, key="v6_heatmap_summary")
+
+        with vc2:
+            fig_bar_v6 = px.bar(
+                _channel_summary,
+                x="Iteration",
+                y="avg_oos_rmse",
+                color="_channel",
+                barmode="group",
+                color_discrete_map={"DIGITAL": "#4C78A8", "PHYSICAL": "#F58518"},
+                labels={
+                    "avg_oos_rmse": "Average OOS RMSE",
+                    "_channel": "Channel",
+                },
+                title="Average OOS RMSE by Iteration and Channel",
+            )
+            fig_bar_v6.update_layout(margin=dict(l=10, r=10, t=40, b=10), height=380)
+            st.plotly_chart(fig_bar_v6, use_container_width=True, key="v6_channel_summary")
+
+            st.markdown("**Best Iteration by State and Channel**")
+            st.dataframe(
+                _best_combo_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                    "R. Sq": st.column_config.NumberColumn("R²", format="%.4f"),
+                    "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
+                },
+            )
+
+        st.divider()
+
         # Build sparse hierarchical rows: Iteration > State > Channel
         _ch_display = {"PHYSICAL": "Physical", "DIGITAL": "Digital"}
         _table_rows = []
