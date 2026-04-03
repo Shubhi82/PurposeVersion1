@@ -2041,13 +2041,13 @@ def render_tab_mmm_v6() -> None:
         _viz_df["combo"] = _viz_df["_state"] + " | " + _viz_df["_channel"]
 
         _best_idx = (
-            _viz_df.sort_values(["OOS RMSE", "MAPE", "R. Sq"], ascending=[True, True, False])
+            _viz_df.sort_values(["MAPE", "R. Sq"], ascending=[True, False])
             .groupby(["_state", "_channel"], dropna=False)
             .head(1)
             .index
         )
         _best_combo_df = (
-            _viz_df.loc[_best_idx, ["_state", "_channel", "iter_num", "MAPE", "R. Sq", "OOS RMSE"]]
+            _viz_df.loc[_best_idx, ["_state", "_channel", "iter_num", "MAPE", "R. Sq"]]
             .sort_values(["_state", "_channel"])
             .rename(columns={
                 "_state": "State",
@@ -2060,29 +2060,34 @@ def render_tab_mmm_v6() -> None:
         _iter_summary = (
             _viz_df.groupby(["iter_num", "Iteration"], dropna=False)
             .agg(
-                avg_oos_rmse=("OOS RMSE", "mean"),
                 avg_mape=("MAPE", "mean"),
                 avg_rsq=("R. Sq", "mean"),
             )
             .reset_index()
-            .sort_values(["avg_oos_rmse", "avg_mape", "avg_rsq"], ascending=[True, True, False])
+            .sort_values(["avg_mape", "avg_rsq"], ascending=[True, False])
         )
         _best_overall = _iter_summary.iloc[0]
 
         _channel_summary = (
             _viz_df.groupby(["_channel", "iter_num", "Iteration"], dropna=False)
-            .agg(avg_oos_rmse=("OOS RMSE", "mean"))
+            .agg(
+                avg_mape=("MAPE", "mean"),
+                avg_rsq=("R. Sq", "mean"),
+            )
             .reset_index()
-            .sort_values(["_channel", "avg_oos_rmse"])
+            .sort_values(["_channel", "avg_mape", "avg_rsq"], ascending=[True, True, False])
         )
         _best_digital = _channel_summary[_channel_summary["_channel"] == "DIGITAL"].iloc[0]
         _best_physical = _channel_summary[_channel_summary["_channel"] == "PHYSICAL"].iloc[0]
 
         _state_summary = (
             _viz_df.groupby("_state", dropna=False)
-            .agg(avg_oos_rmse=("OOS RMSE", "mean"))
+            .agg(
+                avg_mape=("MAPE", "mean"),
+                avg_rsq=("R. Sq", "mean"),
+            )
             .reset_index()
-            .sort_values("avg_oos_rmse")
+            .sort_values(["avg_mape", "avg_rsq"], ascending=[True, False])
         )
         _best_state = _state_summary.iloc[0]
 
@@ -2091,10 +2096,10 @@ def render_tab_mmm_v6() -> None:
         qc1.metric("Best Overall Iteration", str(int(_best_overall["iter_num"])))
         qc2.metric("Best DIGITAL Iteration", str(int(_best_digital["iter_num"])))
         qc3.metric("Best PHYSICAL Iteration", str(int(_best_physical["iter_num"])))
-        qc4.metric("Best State Avg OOS RMSE", f"{_best_state['_state']} ({_best_state['avg_oos_rmse']:.2f})")
+        qc4.metric("Best State Avg MAPE", f"{_best_state['_state']} ({_best_state['avg_mape']:.2f}%)")
 
         st.caption(
-            "Lower OOS RMSE and MAPE are better. Higher R² is better. "
+            "Lower MAPE is better. Higher R² is better. "
             "These visuals summarize which iterations are strongest before the detailed table."
         )
 
@@ -2106,7 +2111,7 @@ def render_tab_mmm_v6() -> None:
                 _heat_source.pivot_table(
                     index="combo",
                     columns="iter_num_label",
-                    values="OOS RMSE",
+                    values="MAPE",
                     aggfunc="mean",
                 )
                 .sort_index()
@@ -2117,11 +2122,11 @@ def render_tab_mmm_v6() -> None:
                 x=_heat.columns.tolist(),
                 y=_heat.index.tolist(),
                 colorscale="YlGnBu_r",
-                colorbar_title="OOS RMSE",
-                hovertemplate="State|Channel: %{y}<br>Iteration: %{x}<br>OOS RMSE: %{z:.2f}<extra></extra>",
+                colorbar_title="MAPE (%)",
+                hovertemplate="State|Channel: %{y}<br>Iteration: %{x}<br>MAPE: %{z:.2f}%<extra></extra>",
             ))
             fig_heat_v6.update_layout(
-                title="OOS RMSE Heatmap by State and Channel",
+                title="MAPE Heatmap by State and Channel",
                 height=max(380, 34 * len(_heat.index)),
                 margin=dict(l=10, r=10, t=40, b=10),
             )
@@ -2133,16 +2138,16 @@ def render_tab_mmm_v6() -> None:
             fig_bar_v6 = px.bar(
                 _bar_df,
                 x="iter_num_label",
-                y="avg_oos_rmse",
+                y="avg_rsq",
                 color="_channel",
                 barmode="group",
                 color_discrete_map={"DIGITAL": "#4C78A8", "PHYSICAL": "#F58518"},
                 labels={
                     "iter_num_label": "Iteration",
-                    "avg_oos_rmse": "Average OOS RMSE",
+                    "avg_rsq": "Average R²",
                     "_channel": "Channel",
                 },
-                title="Average OOS RMSE by Iteration and Channel",
+                title="Average R² by Iteration and Channel",
             )
             fig_bar_v6.update_layout(margin=dict(l=10, r=10, t=40, b=10), height=380)
             st.plotly_chart(fig_bar_v6, use_container_width=True, key="v6_channel_summary")
@@ -2155,7 +2160,6 @@ def render_tab_mmm_v6() -> None:
                 column_config={
                     "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
                     "R. Sq": st.column_config.NumberColumn("R²", format="%.4f"),
-                    "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
                 },
             )
 
