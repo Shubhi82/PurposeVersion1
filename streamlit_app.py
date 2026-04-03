@@ -1966,19 +1966,18 @@ def render_tab_mmm_v6() -> None:
             "**No NNLS, no Fourier.** OLS only. Target: NON_DM_APPLICATIONS.",
             "Train: 2024 + 2025. OOS test: first 8 weeks of 2026.",
         ],
-        note="Sweepstakes excluded. Lag applied per state. Interaction computed on scaled values.",
+        note="Uses the NON-DM workflow. Target = APPLICATIONS - DM_APPLICATIONS, clipped at zero. Sweepstakes excluded. Lag applied per state. Interaction computed on scaled values.",
     )
 
     # ------------------------------------------------------------------
     # Controls
     # ------------------------------------------------------------------
     from utils import (
-        MARKETING_SPEND_PATH as _msp6, DM_DATA_PATH as _dmp6,
-        ORIGINATIONS_V5_PATH as _op6,
+        MARKETING_SPEND_PATH as _msp6, ORIGINATIONS_V5_PATH as _op6,
     )
-    from data_processing import fit_v6_iteration as _fit_v6, TACTIC_COLS_V5 as _v6_tactics
+    from data_processing import DM_DIFF_PATH as _dm_diff6, fit_v6_iteration as _fit_v6, TACTIC_COLS_V5 as _v6_tactics
 
-    missing = [n for p, n in [(_msp6, _msp6.name), (_dmp6, _dmp6.name), (_op6, _op6.name)] if not p.exists()]
+    missing = [n for p, n in [(_msp6, _msp6.name), (_op6, _op6.name), (_dm_diff6, _dm_diff6.name)] if not p.exists()]
     if missing:
         st.error(f"Missing raw data files: {', '.join(missing)}")
         return
@@ -1990,9 +1989,9 @@ def render_tab_mmm_v6() -> None:
         with st.spinner("Running 128 configurations (16 iterations × AL/CA/DE/FL × DIGITAL/PHYSICAL)…"):
             for _ch in ["DIGITAL", "PHYSICAL"]:
                 try:
-                    _frame = cached_build_modeling_frame(_ch)
+                    _frame = cached_build_v7_modeling_frame(_ch)
                 except Exception as exc:
-                    st.warning(f"Could not build frame for {_ch}: {exc}")
+                    st.warning(f"Could not build NON-DM frame for {_ch}: {exc}")
                     continue
                 for _state in _V6_FIXED_STATES:
                     _edf = _frame[_frame["STATE_CD"] == _state].copy()

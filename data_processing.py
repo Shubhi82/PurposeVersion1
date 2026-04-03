@@ -1434,6 +1434,63 @@ def load_v7_dm_differences(path: Path = DM_DIFF_PATH) -> pd.DataFrame:
     return df
 
 
+def build_non_dm_application_series(channel: str | None = None) -> pd.DataFrame:
+    """
+    Build NON_DM_APPLICATIONS using the Version 7 logic:
+    NON_DM_APPLICATIONS = APPLICATIONS - DM_APPLICATIONS, clipped at zero.
+
+    If a channel is provided and the source files carry channel detail, the
+    target is built for that channel only.
+    """
+    originations = load_originations_data(ORIGINATIONS_V5_PATH)
+    dm_diff = load_v7_dm_differences()
+
+    originations = originations.copy()
+    originations.columns = [str(c).strip().upper() for c in originations.columns]
+    dm_diff = dm_diff.copy()
+    dm_diff.columns = [str(c).strip().upper() for c in dm_diff.columns]
+
+    if channel and "CHANNEL_CD" in originations.columns:
+        originations = originations[originations["CHANNEL_CD"].astype(str).str.upper() == channel].copy()
+    if channel and "ORIG_CHANNEL_CD" in dm_diff.columns:
+        dm_diff = dm_diff[dm_diff["ORIG_CHANNEL_CD"].astype(str).str.upper() == channel].copy()
+
+    orig_agg = (
+        originations
+        .groupby(["ISO_YEAR", "ISO_WEEK", "STATE_CD"], as_index=False)["APPLICATIONS"]
+        .sum()
+    )
+
+    dm_clean = (
+        dm_diff
+        .groupby(["ISO_YEAR", "ISO_WEEK", "STATE_CD"], as_index=False)["DM_APPLICATIONS"]
+        .sum()
+    )
+
+    df = orig_agg.merge(
+        dm_clean,
+        on=["ISO_YEAR", "ISO_WEEK", "STATE_CD"],
+        how="left",
+    )
+    df["DM_APPLICATIONS"] = df["DM_APPLICATIONS"].fillna(0)
+    df["NON_DM_APPLICATIONS"] = (df["APPLICATIONS"] - df["DM_APPLICATIONS"]).clip(lower=0)
+    return df
+
+
+def get_modeling_dataset(marketing_df: pd.DataFrame, channel: str | None = None) -> pd.DataFrame:
+    """
+    Final merged dataset used by the Version 7 NON-DM regression flow.
+    """
+    target_df = build_non_dm_application_series(channel=channel)
+    df = target_df.merge(
+        marketing_df,
+        on=["ISO_YEAR", "ISO_WEEK", "STATE_CD"],
+        how="left",
+    )
+    df["TARGET"] = df["NON_DM_APPLICATIONS"]
+    return df
+
+
 def build_v7_modeling_frame(channel: str) -> pd.DataFrame:
     """
     Build the V7 modeling frame using DM_Negative_Differences.xlsx.
@@ -1462,24 +1519,7 @@ def build_v7_modeling_frame(channel: str) -> pd.DataFrame:
     ).reset_index()
     ms_wide.columns.name = None
 
-    dm_diff = load_v7_dm_differences()
-    target = dm_diff.copy()
-    if "ORIG_CHANNEL_CD" in target.columns:
-        target = target[target["ORIG_CHANNEL_CD"] == channel].copy()
-
-    target = (
-        target.groupby(["ISO_YEAR", "ISO_WEEK", "STATE_CD"], dropna=False)[["APPLICATIONS", "DM_APPLICATIONS"]]
-        .sum()
-        .reset_index()
-    )
-    target["NON_DM_APPLICATIONS"] = (target["APPLICATIONS"] - target["DM_APPLICATIONS"]).clip(lower=0)
-
-    df = pd.merge(
-        ms_wide,
-        target[["ISO_YEAR", "ISO_WEEK", "STATE_CD", "APPLICATIONS", "DM_APPLICATIONS", "NON_DM_APPLICATIONS"]],
-        on=["ISO_YEAR", "ISO_WEEK", "STATE_CD"],
-        how="inner",
-    ).fillna(0)
+    df = get_modeling_dataset(ms_wide, channel=channel).fillna(0)
 
     f_dummies = pd.get_dummies((df["ISO_WEEK"] - 1) // 2, prefix="F", dtype=int)
     df = pd.concat([df, f_dummies], axis=1)
