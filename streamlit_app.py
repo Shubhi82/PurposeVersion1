@@ -2186,6 +2186,7 @@ def render_tab_mmm_v6() -> None:
                             _r["MAPE"], _r["R. Sq"], _r["RMSE"], _r["OOS RMSE"], _r["Coefficients"]
                         )
                     _table_rows.append({
+                        "Iteration #": str(_cfg["num"]) if _first_iter else "",
                         "Iteration": _cfg["label"] if _first_iter else "",
                         "State":     _state if _first_state else "",
                         "Channel":   _ch_display[_ch],
@@ -2204,6 +2205,7 @@ def render_tab_mmm_v6() -> None:
             use_container_width=True,
             height=min(35 * len(_table_rows) + 38, 900),
             column_config={
+                "Iteration #":   st.column_config.TextColumn("Iteration #", width="small"),
                 "Iteration":    st.column_config.TextColumn("Iteration", width="large"),
                 "State":        st.column_config.TextColumn("State",     width="small"),
                 "Channel":      st.column_config.TextColumn("Channel",   width="small"),
@@ -2216,8 +2218,8 @@ def render_tab_mmm_v6() -> None:
             hide_index=True,
         )
         st.caption(
-            "The table groups rows by Iteration → State → Channel. "
-            "When a cell in Iteration or State is blank, it belongs to the same group as the last non-blank value above it. "
+            "The table groups rows by Iteration # → Iteration → State → Channel. "
+            "When a cell in Iteration #, Iteration, or State is blank, it belongs to the same group as the last non-blank value above it. "
             "OOS RMSE = prediction error on the first 8 weeks of 2026 (data the model never trained on). "
             "Lower MAPE/RMSE/OOS RMSE = better fit. Higher R² = more variance explained."
         )
