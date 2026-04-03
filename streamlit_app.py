@@ -2272,47 +2272,55 @@ def render_tab_mmm_v6() -> None:
                         + "-W"
                         + _top2_df["ISO_WEEK"].astype(int).astype(str).str.zfill(2)
                     )
-                    _app_chart_df = _top2_df.rename(columns={"STATE_CD": "State"}).copy()
-                    fig_apps_top2 = px.line(
-                        _app_chart_df,
-                        x="Period",
-                        y="NON_DM_APPLICATIONS",
-                        color="State",
-                        markers=True,
-                        category_orders={"State": _top_states},
-                        color_discrete_sequence=["#4C78A8", "#F58518"],
-                        title=f"Top 2 States in {v6_top2_channel}: Applications (Non-DM)",
-                        labels={"NON_DM_APPLICATIONS": "Applications (Non-DM)"},
-                    )
-                    fig_apps_top2.update_layout(
-                        height=340,
-                        margin=dict(l=10, r=10, t=50, b=10),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    )
-                    fig_apps_top2.update_xaxes(tickangle=-90)
-                    st.plotly_chart(fig_apps_top2, use_container_width=True, key="v6_top2_states_apps_chart")
-
-                    fig_spend_top2 = px.line(
-                        _app_chart_df,
-                        x="Period",
-                        y="TOTAL_SPEND",
-                        color="State",
-                        markers=True,
-                        category_orders={"State": _top_states},
-                        color_discrete_sequence=["#4C78A8", "#F58518"],
-                        title=f"Top 2 States in {v6_top2_channel}: Total Spend",
-                        labels={"TOTAL_SPEND": "Total Spend"},
-                    )
-                    fig_spend_top2.update_layout(
-                        height=340,
-                        margin=dict(l=10, r=10, t=50, b=10),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    )
-                    fig_spend_top2.update_xaxes(tickangle=-90)
-                    st.plotly_chart(fig_spend_top2, use_container_width=True, key="v6_top2_states_spend_chart")
+                    chart_cols = st.columns(2)
+                    for idx, _state_name in enumerate(_top_states):
+                        _state_df = (
+                            _top2_df[_top2_df["STATE_CD"] == _state_name]
+                            .copy()
+                            .sort_values(["ISO_YEAR", "ISO_WEEK"])
+                        )
+                        fig_state = go.Figure()
+                        fig_state.add_trace(go.Scatter(
+                            x=_state_df["Period"],
+                            y=_state_df["TOTAL_SPEND"],
+                            mode="lines+markers",
+                            name="Total Spend",
+                            line=dict(color="#4C78A8", width=2),
+                            marker=dict(color="#4C78A8"),
+                            yaxis="y1",
+                        ))
+                        fig_state.add_trace(go.Scatter(
+                            x=_state_df["Period"],
+                            y=_state_df["NON_DM_APPLICATIONS"],
+                            mode="lines+markers",
+                            name="Applications (Non-DM)",
+                            line=dict(color="#F58518", width=2),
+                            marker=dict(color="#F58518"),
+                            yaxis="y2",
+                        ))
+                        fig_state.update_layout(
+                            title=f"{_state_name}: Spend vs Applications",
+                            height=360,
+                            margin=dict(l=10, r=10, t=50, b=10),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                            xaxis=dict(title="Period", tickangle=-90),
+                            yaxis=dict(title="Total Spend", side="left"),
+                            yaxis2=dict(
+                                title="Applications (Non-DM)",
+                                overlaying="y",
+                                side="right",
+                                showgrid=False,
+                            ),
+                        )
+                        with chart_cols[idx]:
+                            st.plotly_chart(
+                                fig_state,
+                                use_container_width=True,
+                                key=f"v6_top2_state_dual_axis_{_state_name.lower()}",
+                            )
                     st.caption(
                         f"Top 2 states are selected by total NON_DM applications within {v6_top2_channel}. "
-                        "Applications are shown in their own chart so they are not visually flattened by the much larger spend scale."
+                        "Each state now has a dual-axis chart: spend on the left axis and applications on the right axis."
                     )
                     st.dataframe(
                         _top2_df.rename(columns={
