@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import data_processing as dp
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -15,42 +16,40 @@ try:
 except Exception:
     scipy_nnls = None
 
-from data_processing import (
-    build_application_series,
-    build_channel_comparison_table,
-    build_modeling_frame,
-    build_v7_modeling_frame,
-    build_product_spend_series,
-    build_tactic_time_series,
-    exclude_direct_mail_rows,
-    filter_rolled_up_products,
-    load_marketing_spend_data,
-    load_marketing_spend_raw,
-    load_dm_data,
-    load_modeling_data,
-    load_originations_data,
-    load_originations_raw,
-    ms_spend_by_channel,
-    ms_spend_by_product,
-    ms_spend_by_state,
-    ms_spend_by_state_tactic,
-    ms_spend_by_tactic,
-    ms_spend_over_time,
-    ms_tactic_channel_matrix,
-    od_channel_state_matrix,
-    od_funnel_by_state,
-    od_metrics_by_channel,
-    od_metrics_by_product,
-    od_metrics_by_state,
-    od_metrics_over_time,
-    prepare_modeling_dataset,
-    prepare_raw_mmm_dataset,
-    run_all_configs_for_entity,
-    run_ols_configs_for_entity,
-    run_v6_iterations_for_entity,
-    V6_ITERATIONS,
-    summarize_dm_data,
-)
+build_application_series = dp.build_application_series
+build_channel_comparison_table = dp.build_channel_comparison_table
+build_modeling_frame = dp.build_modeling_frame
+build_v7_modeling_frame = getattr(dp, "build_v7_modeling_frame", dp.build_modeling_frame)
+build_product_spend_series = dp.build_product_spend_series
+build_tactic_time_series = dp.build_tactic_time_series
+exclude_direct_mail_rows = dp.exclude_direct_mail_rows
+filter_rolled_up_products = dp.filter_rolled_up_products
+load_marketing_spend_data = dp.load_marketing_spend_data
+load_marketing_spend_raw = dp.load_marketing_spend_raw
+load_dm_data = dp.load_dm_data
+load_modeling_data = dp.load_modeling_data
+load_originations_data = dp.load_originations_data
+load_originations_raw = dp.load_originations_raw
+ms_spend_by_channel = dp.ms_spend_by_channel
+ms_spend_by_product = dp.ms_spend_by_product
+ms_spend_by_state = dp.ms_spend_by_state
+ms_spend_by_state_tactic = dp.ms_spend_by_state_tactic
+ms_spend_by_tactic = dp.ms_spend_by_tactic
+ms_spend_over_time = dp.ms_spend_over_time
+ms_tactic_channel_matrix = dp.ms_tactic_channel_matrix
+od_channel_state_matrix = dp.od_channel_state_matrix
+od_funnel_by_state = dp.od_funnel_by_state
+od_metrics_by_channel = dp.od_metrics_by_channel
+od_metrics_by_product = dp.od_metrics_by_product
+od_metrics_by_state = dp.od_metrics_by_state
+od_metrics_over_time = dp.od_metrics_over_time
+prepare_modeling_dataset = dp.prepare_modeling_dataset
+prepare_raw_mmm_dataset = getattr(dp, "prepare_raw_mmm_dataset", None)
+run_all_configs_for_entity = getattr(dp, "run_all_configs_for_entity", None)
+run_ols_configs_for_entity = getattr(dp, "run_ols_configs_for_entity", None)
+run_v6_iterations_for_entity = getattr(dp, "run_v6_iterations_for_entity", None)
+V6_ITERATIONS = getattr(dp, "V6_ITERATIONS", [])
+summarize_dm_data = dp.summarize_dm_data
 from modeling import fit_channel_models
 from utils import (
     CHANNELS,
