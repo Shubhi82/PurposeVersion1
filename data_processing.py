@@ -1197,6 +1197,7 @@ def fit_v6_iteration(
     add_interaction: bool = False,
     drop_prescreen: bool = False,
     log_tactics: list | None = None,
+    target_col: str = "NON_DM_APPLICATIONS",
     train_years: list | None = None,
     n_test_weeks: int = 8,
 ) -> dict | None:
@@ -1216,6 +1217,9 @@ def fit_v6_iteration(
 
     df = _apply_prescreen_transform(entity_df, prescreen_transform)
     df = df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+    if target_col not in df.columns:
+        return None
 
     # Apply LOG to specified tactic columns before scaling (saturation transform)
     if log_tactics:
@@ -1282,8 +1286,8 @@ def fit_v6_iteration(
     X_te = np.hstack([X_te_tactic, X_te_seasonal, X_te_extra])
     all_features = tactics + seasonal + extra_features
 
-    y_tr = train["NON_DM_APPLICATIONS"].values.astype(float)
-    y_te = test["NON_DM_APPLICATIONS"].values.astype(float)
+    y_tr = train[target_col].values.astype(float)
+    y_te = test[target_col].values.astype(float)
 
     lr = LinearRegression(fit_intercept=False)
     lr.fit(X_tr, y_tr)
@@ -1308,6 +1312,7 @@ def fit_v6_iteration(
         "dummy_family": dummy_family,
         "train_rows": n,
         "test_rows": len(y_te),
+        "target_col": target_col,
         "R2": round(r2, 6),
         "AdjR2": round(adj_r2, 6),
         "MAE": round(mae, 6),

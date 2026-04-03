@@ -163,7 +163,13 @@ def render_version_intro(title: str, steps: list[str], note: str | None = None) 
         st.write(f"{idx}. {step}")
 
 
-def _call_fit_v6_compat(fit_func, entity_df: pd.DataFrame, channel: str, cfg: dict):
+def _call_fit_v6_compat(
+    fit_func,
+    entity_df: pd.DataFrame,
+    channel: str,
+    cfg: dict,
+    extra_kwargs: dict | None = None,
+):
     """
     Call fit_v6_iteration defensively.
     Streamlit Cloud can briefly load mismatched app/module versions during deploys,
@@ -176,6 +182,8 @@ def _call_fit_v6_compat(fit_func, entity_df: pd.DataFrame, channel: str, cfg: di
         "drop_prescreen": cfg["drop_prescreen"],
         "log_tactics": cfg.get("log_tactics"),
     }
+    if extra_kwargs:
+        kwargs.update(extra_kwargs)
     try:
         signature = inspect.signature(fit_func)
         supported = {name for name in signature.parameters}
@@ -2653,6 +2661,302 @@ def render_tab_mmm_v7() -> None:
                 st.text(f"  {f:<20} {c:+.4f}  {bar}")
 
 
+def render_tab_mmm_v8() -> None:
+    render_version_intro(
+        "Version 8 — With DM vs Without DM Comparison",
+        [
+            "Confirms the V6/V7 logic: **V6 already excludes DM applications** because it models `NON_DM_APPLICATIONS`.",
+            "Runs the same 16 OLS iterations twice for each AL, CA, DE, FL state and for both DIGITAL and PHYSICAL channels.",
+            "Comparison 1 uses `APPLICATIONS` (with DM included). Comparison 2 uses `NON_DM_APPLICATIONS` (DM removed using `DM_Negative_Differences.xlsx`).",
+            "Shows how `MAPE`, `R²`, and `RMSE` change by iteration when DM applications are included vs excluded.",
+            "Highlights the Direct Mail impact itself with `APPLICATIONS`, `DM_APPLICATIONS`, and `NON_DM_APPLICATIONS` over time.",
+        ],
+        note="Train: 2024 + 2025. Test: first 8 weeks of 2026. Same V6 iteration settings, only the target changes.",
+    )
+
+    from utils import (
+        MARKETING_SPEND_PATH as _msp8,
+        ORIGINATIONS_V5_PATH as _op8,
+    )
+    from data_processing import DM_DIFF_PATH as _dm_diff8, fit_v6_iteration as _fit_v8
+
+    missing = [n for p, n in [(_msp8, _msp8.name), (_op8, _op8.name), (_dm_diff8, _dm_diff8.name)] if not p.exists()]
+    if missing:
+        st.error(f"Missing V8 input files: {', '.join(missing)}")
+        return
+
+    st.caption("`With DM` uses total APPLICATIONS. `Without DM` uses NON_DM_APPLICATIONS = max(0, APPLICATIONS − DM_APPLICATIONS).")
+
+    v8_run = st.button("▶ Run DM Comparison", key="v8_run")
+    if v8_run:
+        _target_specs = [
+            {"target_label": "With DM", "target_col": "APPLICATIONS"},
+            {"target_label": "Without DM", "target_col": "NON_DM_APPLICATIONS"},
+        ]
+        all_rows = []
+        with st.spinner("Running V8 comparison across all states, channels, and iterations…"):
+            for _ch in ["DIGITAL", "PHYSICAL"]:
+                try:
+                    _frame = cached_build_v7_modeling_frame(_ch)
+                except Exception as exc:
+                    st.warning(f"Could not build V8 frame for {_ch}: {exc}")
+                    continue
+
+                for _state in _V6_FIXED_STATES:
+                    _edf = _frame[_frame["STATE_CD"] == _state].copy()
+                    _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+                    for _cfg in V6_ITERATIONS:
+                        for _target in _target_specs:
+                            _res = _call_fit_v6_compat(
+                                _fit_v8,
+                                _edf,
+                                _ch,
+                                _cfg,
+                                extra_kwargs={"target_col": _target["target_col"]},
+                            )
+                            if _res is None:
+                                continue
+                            all_rows.append({
+                                "iter_num": _cfg["num"],
+                                "Iteration": _cfg["label"],
+                                "_state": _state,
+                                "_channel": _ch,
+                                "target_label": _target["target_label"],
+                                "target_col": _target["target_col"],
+                                "MAPE": round(float(_res["MAPE"]), 2),
+                                "R. Sq": round(float(_res["R2"]), 4),
+                                "RMSE": round(float(_res["RMSE"]), 2),
+                                "OOS RMSE": round(float(np.sqrt(np.mean((_res["y_test_actual"] - _res["y_test_pred"]) ** 2))), 2)
+                                if len(_res["y_test_actual"]) > 0 else np.nan,
+                                "_result": _res,
+                            })
+        st.session_state["v8_all"] = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
+
+    all_results: pd.DataFrame | None = st.session_state.get("v8_all")
+    if all_results is None or all_results.empty:
+        st.info("Click **▶ Run DM Comparison** to compare each iteration with and without DM applications.")
+        return
+
+    _overview = (
+        all_results.pivot_table(
+            index=["_state", "_channel"],
+            columns="target_label",
+            values=["MAPE", "R. Sq", "RMSE"],
+            aggfunc="mean",
+        )
+        .sort_index()
+    )
+    _overview.columns = [f"{metric} | {target}" for metric, target in _overview.columns]
+    overview_df = _overview.reset_index().rename(columns={"_state": "State", "_channel": "Channel"})
+    overview_df["Delta MAPE (Without - With)"] = overview_df["MAPE | Without DM"] - overview_df["MAPE | With DM"]
+    overview_df["Delta R² (Without - With)"] = overview_df["R. Sq | Without DM"] - overview_df["R. Sq | With DM"]
+    overview_df["Delta RMSE (Without - With)"] = overview_df["RMSE | Without DM"] - overview_df["RMSE | With DM"]
+
+    st.markdown("**State and Channel Overview**")
+    st.dataframe(
+        overview_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "MAPE | With DM": st.column_config.NumberColumn("Avg MAPE | With DM (%)", format="%.2f"),
+            "MAPE | Without DM": st.column_config.NumberColumn("Avg MAPE | Without DM (%)", format="%.2f"),
+            "Delta MAPE (Without - With)": st.column_config.NumberColumn("Delta MAPE", format="%.2f"),
+            "R. Sq | With DM": st.column_config.NumberColumn("Avg R² | With DM", format="%.4f"),
+            "R. Sq | Without DM": st.column_config.NumberColumn("Avg R² | Without DM", format="%.4f"),
+            "Delta R² (Without - With)": st.column_config.NumberColumn("Delta R²", format="%.4f"),
+            "RMSE | With DM": st.column_config.NumberColumn("Avg RMSE | With DM", format="%.2f"),
+            "RMSE | Without DM": st.column_config.NumberColumn("Avg RMSE | Without DM", format="%.2f"),
+            "Delta RMSE (Without - With)": st.column_config.NumberColumn("Delta RMSE", format="%.2f"),
+        },
+    )
+
+    overview_heat = overview_df.copy()
+    overview_heat["combo"] = overview_heat["State"] + " | " + overview_heat["Channel"]
+    fig_overview_heat = go.Figure(data=go.Heatmap(
+        z=overview_heat[["Delta MAPE (Without - With)", "Delta R² (Without - With)", "Delta RMSE (Without - With)"]].values,
+        x=["Delta MAPE", "Delta R²", "Delta RMSE"],
+        y=overview_heat["combo"],
+        colorscale="RdYlGn_r",
+        hovertemplate="State|Channel: %{y}<br>%{x}: %{z:.4f}<extra></extra>",
+    ))
+    fig_overview_heat.update_layout(
+        title="Average Metric Change After Removing DM Applications",
+        height=max(320, 36 * len(overview_heat)),
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    st.plotly_chart(fig_overview_heat, use_container_width=True, key="v8_overview_heat")
+    st.caption("For this overview: lower Delta MAPE / Delta RMSE is better, while higher Delta R² is better.")
+
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        v8_state = st.selectbox("State", _V6_FIXED_STATES, key="v8_state")
+    with fc2:
+        v8_channel = st.selectbox("Channel", ["DIGITAL", "PHYSICAL"], key="v8_channel")
+
+    selected = (
+        all_results[
+            (all_results["_state"] == v8_state) &
+            (all_results["_channel"] == v8_channel)
+        ]
+        .copy()
+        .sort_values(["iter_num", "target_label"])
+    )
+    if selected.empty:
+        st.warning("No V8 comparison results are available for this state/channel.")
+        return
+
+    impact_frame = cached_build_v7_modeling_frame(v8_channel)
+    impact_frame = (
+        impact_frame[impact_frame["STATE_CD"] == v8_state]
+        .copy()
+        .sort_values(["ISO_YEAR", "ISO_WEEK"])
+        .reset_index(drop=True)
+    )
+    impact_frame["PERIOD"] = impact_frame["ISO_YEAR"].astype(int).astype(str) + "-W" + impact_frame["ISO_WEEK"].astype(int).astype(str).str.zfill(2)
+    impact_frame["DM_REMOVED"] = (impact_frame["APPLICATIONS"] - impact_frame["NON_DM_APPLICATIONS"]).clip(lower=0)
+
+    total_apps = float(impact_frame["APPLICATIONS"].sum())
+    total_dm = float(impact_frame["DM_REMOVED"].sum())
+    total_non_dm = float(impact_frame["NON_DM_APPLICATIONS"].sum())
+    dm_share = (total_dm / total_apps * 100) if total_apps > 0 else np.nan
+
+    st.markdown("**DM Impact Snapshot**")
+    dc1, dc2, dc3, dc4 = st.columns(4)
+    dc1.metric("Applications", f"{total_apps:,.0f}")
+    dc2.metric("DM Applications Removed", f"{total_dm:,.0f}")
+    dc3.metric("Non-DM Applications", f"{total_non_dm:,.0f}")
+    dc4.metric("DM Share", f"{dm_share:.2f}%" if not np.isnan(dm_share) else "N/A")
+    st.caption("`DM Applications Removed` is the negative difference highlighted from `DM_Negative_Differences.xlsx` after clipping at zero.")
+
+    fig_impact = go.Figure()
+    fig_impact.add_trace(go.Bar(
+        x=impact_frame["PERIOD"],
+        y=impact_frame["DM_REMOVED"],
+        name="DM Applications Removed",
+        marker_color="#E45756",
+        opacity=0.45,
+    ))
+    fig_impact.add_trace(go.Scatter(
+        x=impact_frame["PERIOD"],
+        y=impact_frame["APPLICATIONS"],
+        mode="lines+markers",
+        name="Applications (With DM)",
+        line=dict(color="#4C78A8", width=2),
+    ))
+    fig_impact.add_trace(go.Scatter(
+        x=impact_frame["PERIOD"],
+        y=impact_frame["NON_DM_APPLICATIONS"],
+        mode="lines+markers",
+        name="Non-DM Applications",
+        line=dict(color="#54A24B", width=2),
+    ))
+    fig_impact.update_layout(
+        title=f"DM Difference Over Time — {v8_state} {v8_channel}",
+        xaxis_title="Period",
+        yaxis_title="Applications",
+        height=420,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    st.plotly_chart(fig_impact, use_container_width=True, key="v8_dm_impact_chart")
+
+    st.divider()
+    st.markdown("**Iteration Comparison**")
+
+    plot_df = selected.copy()
+    plot_df["iter_num_label"] = plot_df["iter_num"].astype(int).astype(str)
+    color_map = {"With DM": "#4C78A8", "Without DM": "#F58518"}
+
+    gc1, gc2, gc3 = st.columns(3)
+    with gc1:
+        fig_v8_mape = px.line(
+            plot_df,
+            x="iter_num_label",
+            y="MAPE",
+            color="target_label",
+            markers=True,
+            color_discrete_map=color_map,
+            labels={"iter_num_label": "Iteration", "MAPE": "MAPE (%)", "target_label": "Target"},
+            title="MAPE by Iteration",
+        )
+        fig_v8_mape.update_layout(height=340, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_v8_mape, use_container_width=True, key="v8_mape_chart")
+
+    with gc2:
+        fig_v8_r2 = px.line(
+            plot_df,
+            x="iter_num_label",
+            y="R. Sq",
+            color="target_label",
+            markers=True,
+            color_discrete_map=color_map,
+            labels={"iter_num_label": "Iteration", "R. Sq": "R²", "target_label": "Target"},
+            title="R² by Iteration",
+        )
+        fig_v8_r2.update_layout(height=340, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_v8_r2, use_container_width=True, key="v8_r2_chart")
+
+    with gc3:
+        fig_v8_rmse = px.line(
+            plot_df,
+            x="iter_num_label",
+            y="RMSE",
+            color="target_label",
+            markers=True,
+            color_discrete_map=color_map,
+            labels={"iter_num_label": "Iteration", "RMSE": "RMSE", "target_label": "Target"},
+            title="RMSE by Iteration",
+        )
+        fig_v8_rmse.update_layout(height=340, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_v8_rmse, use_container_width=True, key="v8_rmse_chart")
+
+    _best_with_dm = plot_df[plot_df["target_label"] == "With DM"].sort_values(["MAPE", "R. Sq"], ascending=[True, False]).iloc[0]
+    _best_without_dm = plot_df[plot_df["target_label"] == "Without DM"].sort_values(["MAPE", "R. Sq"], ascending=[True, False]).iloc[0]
+    bc1, bc2 = st.columns(2)
+    bc1.metric("Best With-DM Iteration", str(int(_best_with_dm["iter_num"])), f"MAPE {_best_with_dm['MAPE']:.2f}% | R² {_best_with_dm['R. Sq']:.4f}")
+    bc2.metric("Best Without-DM Iteration", str(int(_best_without_dm["iter_num"])), f"MAPE {_best_without_dm['MAPE']:.2f}% | R² {_best_without_dm['R. Sq']:.4f}")
+
+    pivot = (
+        selected.pivot_table(
+            index=["iter_num", "Iteration"],
+            columns="target_label",
+            values=["MAPE", "R. Sq", "RMSE"],
+            aggfunc="first",
+        )
+        .sort_index()
+    )
+    pivot.columns = [f"{metric} | {target}" for metric, target in pivot.columns]
+    compare_df = pivot.reset_index()
+    compare_df["Delta MAPE (Without - With)"] = compare_df["MAPE | Without DM"] - compare_df["MAPE | With DM"]
+    compare_df["Delta R² (Without - With)"] = compare_df["R. Sq | Without DM"] - compare_df["R. Sq | With DM"]
+    compare_df["Delta RMSE (Without - With)"] = compare_df["RMSE | Without DM"] - compare_df["RMSE | With DM"]
+    compare_df.rename(columns={"iter_num": "Iteration #"}, inplace=True)
+
+    st.markdown("**With vs Without DM by Iteration**")
+    st.dataframe(
+        compare_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Iteration #": st.column_config.NumberColumn("Iteration #", format="%d"),
+            "Iteration": st.column_config.TextColumn("Iteration", width="large"),
+            "MAPE | With DM": st.column_config.NumberColumn("MAPE | With DM (%)", format="%.2f"),
+            "MAPE | Without DM": st.column_config.NumberColumn("MAPE | Without DM (%)", format="%.2f"),
+            "Delta MAPE (Without - With)": st.column_config.NumberColumn("Delta MAPE", format="%.2f"),
+            "R. Sq | With DM": st.column_config.NumberColumn("R² | With DM", format="%.4f"),
+            "R. Sq | Without DM": st.column_config.NumberColumn("R² | Without DM", format="%.4f"),
+            "Delta R² (Without - With)": st.column_config.NumberColumn("Delta R²", format="%.4f"),
+            "RMSE | With DM": st.column_config.NumberColumn("RMSE | With DM", format="%.2f"),
+            "RMSE | Without DM": st.column_config.NumberColumn("RMSE | Without DM", format="%.2f"),
+            "Delta RMSE (Without - With)": st.column_config.NumberColumn("Delta RMSE", format="%.2f"),
+        },
+    )
+    st.caption(
+        "Negative Delta MAPE / Delta RMSE means the NON-DM model improved after removing DM applications. "
+        "Positive Delta R² means the NON-DM model explained more variance."
+    )
+
+
 # =============================================================================
 # Tab layout
 # =============================================================================
@@ -2666,6 +2970,7 @@ tabs = st.tabs([
     "🔬 V5",
     "📐 V6",
     "🧮 V7",
+    "⚖️ V8",
 ])
 
 with tabs[0]:
@@ -2694,3 +2999,6 @@ with tabs[7]:
 
 with tabs[8]:
     render_tab_mmm_v7()
+
+with tabs[9]:
+    render_tab_mmm_v8()
