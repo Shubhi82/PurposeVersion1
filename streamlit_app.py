@@ -2272,40 +2272,47 @@ def render_tab_mmm_v6() -> None:
                         + "-W"
                         + _top2_df["ISO_WEEK"].astype(int).astype(str).str.zfill(2)
                     )
-                    _chart_df = _top2_df.melt(
-                        id_vars=["Period", "STATE_CD"],
-                        value_vars=["NON_DM_APPLICATIONS", "TOTAL_SPEND"],
-                        var_name="Metric",
-                        value_name="Value",
-                    )
-                    _chart_df["Metric"] = _chart_df["Metric"].map({
-                        "NON_DM_APPLICATIONS": "Applications (Non-DM)",
-                        "TOTAL_SPEND": "Total Spend",
-                    })
-
-                    fig_top2 = px.line(
-                        _chart_df,
+                    _app_chart_df = _top2_df.rename(columns={"STATE_CD": "State"}).copy()
+                    fig_apps_top2 = px.line(
+                        _app_chart_df,
                         x="Period",
-                        y="Value",
-                        color="STATE_CD",
-                        facet_row="Metric",
+                        y="NON_DM_APPLICATIONS",
+                        color="State",
                         markers=True,
-                        category_orders={"STATE_CD": _top_states},
+                        category_orders={"State": _top_states},
                         color_discrete_sequence=["#4C78A8", "#F58518"],
-                        title=f"Top 2 States in {v6_top2_channel}: Spend vs Applications",
-                        labels={"STATE_CD": "State", "Value": "Value"},
+                        title=f"Top 2 States in {v6_top2_channel}: Applications (Non-DM)",
+                        labels={"NON_DM_APPLICATIONS": "Applications (Non-DM)"},
                     )
-                    fig_top2.update_layout(
-                        height=620,
+                    fig_apps_top2.update_layout(
+                        height=340,
                         margin=dict(l=10, r=10, t=50, b=10),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02),
                     )
-                    fig_top2.update_xaxes(tickangle=-90, matches=None)
-                    fig_top2.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-                    st.plotly_chart(fig_top2, use_container_width=True, key="v6_top2_states_chart")
+                    fig_apps_top2.update_xaxes(tickangle=-90)
+                    st.plotly_chart(fig_apps_top2, use_container_width=True, key="v6_top2_states_apps_chart")
+
+                    fig_spend_top2 = px.line(
+                        _app_chart_df,
+                        x="Period",
+                        y="TOTAL_SPEND",
+                        color="State",
+                        markers=True,
+                        category_orders={"State": _top_states},
+                        color_discrete_sequence=["#4C78A8", "#F58518"],
+                        title=f"Top 2 States in {v6_top2_channel}: Total Spend",
+                        labels={"TOTAL_SPEND": "Total Spend"},
+                    )
+                    fig_spend_top2.update_layout(
+                        height=340,
+                        margin=dict(l=10, r=10, t=50, b=10),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    )
+                    fig_spend_top2.update_xaxes(tickangle=-90)
+                    st.plotly_chart(fig_spend_top2, use_container_width=True, key="v6_top2_states_spend_chart")
                     st.caption(
                         f"Top 2 states are selected by total NON_DM applications within {v6_top2_channel}. "
-                        "Applications shown here are NON-DM applications, matching the V6 target."
+                        "Applications are shown in their own chart so they are not visually flattened by the much larger spend scale."
                     )
                     st.dataframe(
                         _top2_df.rename(columns={
