@@ -2047,12 +2047,12 @@ def render_tab_mmm_v6() -> None:
             .index
         )
         _best_combo_df = (
-            _viz_df.loc[_best_idx, ["_state", "_channel", "Iteration", "MAPE", "R. Sq", "OOS RMSE"]]
+            _viz_df.loc[_best_idx, ["_state", "_channel", "iter_num", "MAPE", "R. Sq", "OOS RMSE"]]
             .sort_values(["_state", "_channel"])
             .rename(columns={
                 "_state": "State",
                 "_channel": "Channel",
-                "Iteration": "Best Iteration",
+                "iter_num": "Best Iteration",
             })
             .reset_index(drop=True)
         )
@@ -2088,9 +2088,9 @@ def render_tab_mmm_v6() -> None:
 
         st.markdown("**Quick Read**")
         qc1, qc2, qc3, qc4 = st.columns(4)
-        qc1.metric("Best Overall Iteration", str(_best_overall["Iteration"]))
-        qc2.metric("Best DIGITAL Iteration", str(_best_digital["Iteration"]))
-        qc3.metric("Best PHYSICAL Iteration", str(_best_physical["Iteration"]))
+        qc1.metric("Best Overall Iteration", str(int(_best_overall["iter_num"])))
+        qc2.metric("Best DIGITAL Iteration", str(int(_best_digital["iter_num"])))
+        qc3.metric("Best PHYSICAL Iteration", str(int(_best_physical["iter_num"])))
         qc4.metric("Best State Avg OOS RMSE", f"{_best_state['_state']} ({_best_state['avg_oos_rmse']:.2f})")
 
         st.caption(
@@ -2100,15 +2100,18 @@ def render_tab_mmm_v6() -> None:
 
         vc1, vc2 = st.columns([1.1, 1])
         with vc1:
+            _heat_source = _viz_df.copy()
+            _heat_source["iter_num_label"] = _heat_source["iter_num"].astype(int).astype(str)
             _heat = (
-                _viz_df.pivot_table(
+                _heat_source.pivot_table(
                     index="combo",
-                    columns="Iteration",
+                    columns="iter_num_label",
                     values="OOS RMSE",
                     aggfunc="mean",
                 )
                 .sort_index()
             )
+            _heat = _heat.reindex(columns=[str(cfg["num"]) for cfg in V6_ITERATIONS if str(cfg["num"]) in _heat.columns])
             fig_heat_v6 = go.Figure(data=go.Heatmap(
                 z=_heat.values,
                 x=_heat.columns.tolist(),
@@ -2125,14 +2128,17 @@ def render_tab_mmm_v6() -> None:
             st.plotly_chart(fig_heat_v6, use_container_width=True, key="v6_heatmap_summary")
 
         with vc2:
+            _bar_df = _channel_summary.copy()
+            _bar_df["iter_num_label"] = _bar_df["iter_num"].astype(int).astype(str)
             fig_bar_v6 = px.bar(
-                _channel_summary,
-                x="Iteration",
+                _bar_df,
+                x="iter_num_label",
                 y="avg_oos_rmse",
                 color="_channel",
                 barmode="group",
                 color_discrete_map={"DIGITAL": "#4C78A8", "PHYSICAL": "#F58518"},
                 labels={
+                    "iter_num_label": "Iteration",
                     "avg_oos_rmse": "Average OOS RMSE",
                     "_channel": "Channel",
                 },
