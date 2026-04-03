@@ -2232,6 +2232,95 @@ def render_tab_mmm_v6() -> None:
             "Lower MAPE/RMSE/OOS RMSE = better fit. Higher R² = more variance explained."
         )
 
+        st.divider()
+        st.markdown("**Top 2 States: Applications vs Spend**")
+        v6_top2_channel = st.selectbox(
+            "Channel",
+            ["DIGITAL", "PHYSICAL"],
+            key="v6_top2_channel",
+        )
+        try:
+            _top2_frame = cached_build_v7_modeling_frame(v6_top2_channel)
+        except Exception as exc:
+            st.warning(f"Could not build the top-2 comparison frame: {exc}")
+        else:
+            _top2_frame = _top2_frame[_top2_frame["STATE_CD"].isin(_V6_FIXED_STATES)].copy()
+            _spend_cols = [c for c in _v6_tactics if c in _top2_frame.columns]
+            if _top2_frame.empty or not _spend_cols:
+                st.info("Not enough data to build the top-2 state comparison chart.")
+            else:
+                _top2_frame["TOTAL_SPEND"] = _top2_frame[_spend_cols].sum(axis=1)
+                _state_rank = (
+                    _top2_frame.groupby("STATE_CD", dropna=False)["NON_DM_APPLICATIONS"]
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                _top_states = _state_rank.head(2).index.tolist()
+                if len(_top_states) < 2:
+                    st.info("At least two states are needed for this comparison.")
+                else:
+                    _top2_df = (
+                        _top2_frame[_top2_frame["STATE_CD"].isin(_top_states)][
+                            ["ISO_YEAR", "ISO_WEEK", "STATE_CD", "TOTAL_SPEND", "NON_DM_APPLICATIONS"]
+                        ]
+                        .copy()
+                        .sort_values(["ISO_YEAR", "ISO_WEEK", "STATE_CD"])
+                        .reset_index(drop=True)
+                    )
+                    _top2_df["Period"] = (
+                        _top2_df["ISO_YEAR"].astype(int).astype(str)
+                        + "-W"
+                        + _top2_df["ISO_WEEK"].astype(int).astype(str).str.zfill(2)
+                    )
+                    _chart_df = _top2_df.melt(
+                        id_vars=["Period", "STATE_CD"],
+                        value_vars=["NON_DM_APPLICATIONS", "TOTAL_SPEND"],
+                        var_name="Metric",
+                        value_name="Value",
+                    )
+                    _chart_df["Metric"] = _chart_df["Metric"].map({
+                        "NON_DM_APPLICATIONS": "Applications (Non-DM)",
+                        "TOTAL_SPEND": "Total Spend",
+                    })
+
+                    fig_top2 = px.line(
+                        _chart_df,
+                        x="Period",
+                        y="Value",
+                        color="STATE_CD",
+                        facet_row="Metric",
+                        markers=True,
+                        category_orders={"STATE_CD": _top_states},
+                        color_discrete_sequence=["#4C78A8", "#F58518"],
+                        title=f"Top 2 States in {v6_top2_channel}: Spend vs Applications",
+                        labels={"STATE_CD": "State", "Value": "Value"},
+                    )
+                    fig_top2.update_layout(
+                        height=620,
+                        margin=dict(l=10, r=10, t=50, b=10),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    )
+                    fig_top2.update_xaxes(tickangle=-90, matches=None)
+                    fig_top2.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+                    st.plotly_chart(fig_top2, use_container_width=True, key="v6_top2_states_chart")
+                    st.caption(
+                        f"Top 2 states are selected by total NON_DM applications within {v6_top2_channel}. "
+                        "Applications shown here are NON-DM applications, matching the V6 target."
+                    )
+                    st.dataframe(
+                        _top2_df.rename(columns={
+                            "STATE_CD": "State",
+                            "TOTAL_SPEND": "Total Spend",
+                            "NON_DM_APPLICATIONS": "Applications (Non-DM)",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Total Spend": st.column_config.NumberColumn("Total Spend", format="%.2f"),
+                            "Applications (Non-DM)": st.column_config.NumberColumn("Applications (Non-DM)", format="%.2f"),
+                        },
+                    )
+
     # ---- Sub-tab 2: Actual vs Predicted -------------------------------
     with sub_tabs[1]:
         _avp_iters = [cfg["label"] for cfg in V6_ITERATIONS]
