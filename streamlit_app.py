@@ -1968,18 +1968,26 @@ _V9_BASE_STATES = ["AL", "CA", "DE", "FL"]
 _V9_SOURCE_ITER_NUMS = [1, 4, 3, 10, 5]
 
 
+def _v9_make_weekly_label(label: str) -> str:
+    return (
+        label.replace("Bi-weekly", "Weekly")
+        .replace("bi-weekly", "weekly")
+    )
+
+
 def _get_v9_shortlist_configs() -> list[dict]:
     source_lookup = {cfg["num"]: cfg for cfg in V6_ITERATIONS}
     configs: list[dict] = []
     for idx, source_iter in enumerate(_V9_SOURCE_ITER_NUMS, start=1):
         base_cfg = source_lookup[source_iter].copy()
+        weekly_label = _v9_make_weekly_label(source_lookup[source_iter]["label"])
         configs.append({
             **base_cfg,
             "candidate_num": idx,
             "source_iter_num": source_iter,
-            "source_label": source_lookup[source_iter]["label"],
+            "source_label": weekly_label,
             "dummy_family": "weekly",
-            "label": f"Weekly Candidate {idx}",
+            "label": f"{source_iter}. {weekly_label}",
         })
     return configs
 
@@ -2004,11 +2012,6 @@ def _get_v9_target_states_and_rank() -> tuple[list[str], pd.DataFrame]:
     )
     next_seven = [state for state in rank_df["State"].tolist() if state not in _V9_BASE_STATES][:7]
     target_states = _V9_BASE_STATES + next_seven
-    rank_df["Group"] = np.where(
-        rank_df["State"].isin(_V9_BASE_STATES),
-        "Current 4",
-        np.where(rank_df["State"].isin(next_seven), "Next 7", "Other Available"),
-    )
     return target_states, rank_df
 
 
@@ -3132,14 +3135,14 @@ def render_tab_mmm_v9() -> None:
             "Runs them as a **weekly-only** workflow across 11 states × 2 channels = 110 configurations.",
             "State set = current 4 states plus the next 7 states from live two-channel NON-DM coverage.",
             "No region forecasts are progressed here; this tab is only for state-level weekly rollout decisions.",
-            "Ranks candidates using lower MAPE and higher R², then highlights the best weekly default for each state-channel combination.",
+            "All 5 shortlisted iterations are forced to weekly dummy structure here, even where the original V6 label was bi-weekly.",
         ],
         note=f"Current weekly rollout states: {', '.join(target_states)}. Regions remain paused until business steer on definitions.",
     )
 
     st.markdown("**State Roster**")
     st.dataframe(
-        roster_df[["State Order", "State", "Group", "Combined Non-DM Applications"]],
+        roster_df[["State Order", "State", "Combined Non-DM Applications"]],
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -3180,10 +3183,8 @@ def render_tab_mmm_v9() -> None:
                         ]
                         _coef_str = " | ".join(f"{f}: {c:.3f}" for f, c in _tac_coefs)
                         all_rows.append({
-                            "candidate_num": _cfg["candidate_num"],
-                            "Candidate": _cfg["label"],
-                            "source_iter_num": _cfg["source_iter_num"],
-                            "Source Iteration": _cfg["source_label"],
+                            "iter_num": _cfg["source_iter_num"],
+                            "Iteration": _cfg["label"],
                             "_state": _state,
                             "_channel": _ch,
                             "MAPE": round(float(_res["MAPE"]), 2),
@@ -3202,173 +3203,39 @@ def render_tab_mmm_v9() -> None:
         return
 
     sub_tabs = st.tabs([
-        "📊 Weekly Overview",
-        "🏆 Winners",
-        "📋 Detailed Table",
-        "📈 State Detail",
+        "📋 Full Table",
+        "📈 State Wise",
     ])
 
     with sub_tabs[0]:
-        summary = (
-            all_results.groupby(["candidate_num", "Candidate", "source_iter_num", "Source Iteration"], dropna=False)
-            .agg(
-                avg_mape=("MAPE", "mean"),
-                avg_rsq=("R. Sq", "mean"),
-                avg_rmse=("RMSE", "mean"),
-                avg_oos_rmse=("OOS RMSE", "mean"),
-                avg_oos_mape=("OOS MAPE", "mean"),
-            )
-            .reset_index()
-            .sort_values(["avg_mape", "avg_rsq"], ascending=[True, False])
-        )
-        best_idx = (
-            all_results.sort_values(["MAPE", "R. Sq"], ascending=[True, False])
-            .groupby(["_state", "_channel"], dropna=False)
-            .head(1)
-            .index
-        )
-        winners = all_results.loc[best_idx].copy().sort_values(["_state", "_channel"]).reset_index(drop=True)
-        winner_counts = (
-            winners.groupby(["candidate_num", "Candidate"], dropna=False)
-            .size()
-            .reset_index(name="win_count")
-        )
-        summary = summary.merge(winner_counts, on=["candidate_num", "Candidate"], how="left").fillna({"win_count": 0})
-        summary["win_count"] = summary["win_count"].astype(int)
-        best_overall = summary.iloc[0]
-
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Recommended Weekly Default", f"C{int(best_overall['candidate_num'])} (Source {int(best_overall['source_iter_num'])})")
-        mc2.metric("Best Avg MAPE", f"{best_overall['avg_mape']:.2f}%")
-        mc3.metric("Best Avg R²", f"{best_overall['avg_rsq']:.4f}")
-        mc4.metric("State-Channel Wins", f"{int(best_overall['win_count'])} / {len(target_states) * len(_V6_CHANNELS)}")
-
-        st.caption("Weekly-only ranking uses lower MAPE and higher R². This is the recommended shortlist view for rolling out to the remaining states.")
-
-        vc1, vc2 = st.columns(2)
-        with vc1:
-            fig_v9_mape = px.bar(
-                summary,
-                x="candidate_num",
-                y="avg_mape",
-                text_auto=".2f",
-                labels={"candidate_num": "Weekly Candidate #", "avg_mape": "Average MAPE (%)"},
-                title="Average MAPE by Weekly Candidate",
-                color_discrete_sequence=["#4C78A8"],
-            )
-            fig_v9_mape.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10))
-            st.plotly_chart(fig_v9_mape, use_container_width=True, key="v9_avg_mape_chart")
-
-        with vc2:
-            fig_v9_r2 = px.bar(
-                summary,
-                x="candidate_num",
-                y="avg_rsq",
-                text_auto=".4f",
-                labels={"candidate_num": "Weekly Candidate #", "avg_rsq": "Average R²"},
-                title="Average R² by Weekly Candidate",
-                color_discrete_sequence=["#F58518"],
-            )
-            fig_v9_r2.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10))
-            st.plotly_chart(fig_v9_r2, use_container_width=True, key="v9_avg_r2_chart")
-
-        st.markdown("**Weekly Candidate Summary**")
-        st.dataframe(
-            summary,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "candidate_num": st.column_config.NumberColumn("Candidate #", format="%d"),
-                "source_iter_num": st.column_config.NumberColumn("Source Iteration #", format="%d"),
-                "avg_mape": st.column_config.NumberColumn("Avg MAPE (%)", format="%.2f"),
-                "avg_rsq": st.column_config.NumberColumn("Avg R²", format="%.4f"),
-                "avg_rmse": st.column_config.NumberColumn("Avg RMSE", format="%.2f"),
-                "avg_oos_rmse": st.column_config.NumberColumn("Avg OOS RMSE", format="%.2f"),
-                "avg_oos_mape": st.column_config.NumberColumn("Avg OOS MAPE (%)", format="%.2f"),
-                "win_count": st.column_config.NumberColumn("Win Count", format="%d"),
-            },
-        )
-
-    with sub_tabs[1]:
-        winners = (
-            all_results.sort_values(["MAPE", "R. Sq"], ascending=[True, False])
-            .groupby(["_state", "_channel"], dropna=False)
-            .head(1)
-            .copy()
-            .sort_values(["_state", "_channel"])
-        )
-        winners["Group"] = winners["_state"].apply(lambda x: "Current 4" if x in _V9_BASE_STATES else "Next 7")
-        st.markdown("**Best Weekly Candidate by State and Channel**")
-        st.dataframe(
-            winners.rename(columns={
+        full_table_df = (
+            all_results.rename(columns={
+                "Iteration": "Iteration",
                 "_state": "State",
                 "_channel": "Channel",
-                "candidate_num": "Candidate #",
-                "source_iter_num": "Source Iteration #",
-            })[["Group", "State", "Channel", "Candidate #", "Source Iteration #", "MAPE", "R. Sq", "RMSE", "OOS RMSE"]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Candidate #": st.column_config.NumberColumn("Candidate #", format="%d"),
-                "Source Iteration #": st.column_config.NumberColumn("Source Iteration #", format="%d"),
-                "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
-                "R. Sq": st.column_config.NumberColumn("R²", format="%.4f"),
-                "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
-                "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
-            },
+            })[
+                ["Iteration", "State", "Channel", "MAPE", "R. Sq", "RMSE", "OOS RMSE", "Coefficients"]
+            ]
+            .sort_values(["Iteration", "State", "Channel"])
+            .reset_index(drop=True)
         )
-
-        win_counts = (
-            winners.groupby(["candidate_num", "Candidate"], dropna=False)
-            .size()
-            .reset_index(name="win_count")
-            .sort_values(["win_count", "candidate_num"], ascending=[False, True])
-        )
-        fig_wins = px.bar(
-            win_counts,
-            x="candidate_num",
-            y="win_count",
-            text_auto=True,
-            labels={"candidate_num": "Weekly Candidate #", "win_count": "State-Channel Wins"},
-            title="How Often Each Weekly Candidate Wins",
-            color_discrete_sequence=["#54A24B"],
-        )
-        fig_wins.update_layout(height=340, margin=dict(l=10, r=10, t=40, b=10))
-        st.plotly_chart(fig_wins, use_container_width=True, key="v9_winner_counts_chart")
-
-    with sub_tabs[2]:
-        detail_df = all_results.copy()
-        detail_df["Group"] = detail_df["_state"].apply(lambda x: "Current 4" if x in _V9_BASE_STATES else "Next 7")
-        detail_df = detail_df.rename(columns={
-            "candidate_num": "Candidate #",
-            "source_iter_num": "Source Iteration #",
-            "Source Iteration": "Source Iteration",
-            "_state": "State",
-            "_channel": "Channel",
-        })
-        detail_df = detail_df[[
-            "Group", "State", "Channel", "Candidate #", "Candidate", "Source Iteration #", "Source Iteration",
-            "MAPE", "R. Sq", "RMSE", "OOS RMSE", "OOS MAPE", "Coefficients"
-        ]].sort_values(["Candidate #", "State", "Channel"])
+        st.markdown("**Combined Weekly Table**")
         st.dataframe(
-            detail_df,
+            full_table_df,
             use_container_width=True,
             hide_index=True,
-            height=720,
+            height=760,
             column_config={
-                "Candidate #": st.column_config.NumberColumn("Candidate #", format="%d"),
-                "Source Iteration #": st.column_config.NumberColumn("Source Iteration #", format="%d"),
                 "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
                 "R. Sq": st.column_config.NumberColumn("R²", format="%.4f"),
                 "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
                 "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
-                "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
                 "Coefficients": st.column_config.TextColumn("Coefficients", width="large"),
             },
         )
-        st.caption("This table is the weekly production comparison set: 11 states × 2 channels × 5 weekly candidates. Region forecasts are intentionally excluded.")
+        st.caption("This is the one combined weekly table for all 5 iterations across all 11 states and both channels.")
 
-    with sub_tabs[3]:
+    with sub_tabs[1]:
         dc1, dc2, dc3 = st.columns(3)
         with dc1:
             sel_state = st.selectbox("State", target_states, key="v9_detail_state")
@@ -3376,15 +3243,14 @@ def render_tab_mmm_v9() -> None:
             sel_channel = st.selectbox("Channel", _V6_CHANNELS, key="v9_detail_channel")
         with dc3:
             sel_candidate = st.selectbox(
-                "Weekly Candidate",
-                [f"C{cfg['candidate_num']} (Source {cfg['source_iter_num']})" for cfg in shortlist],
+                "Iteration",
+                [cfg["label"] for cfg in shortlist],
                 key="v9_detail_candidate",
             )
-        sel_candidate_num = int(sel_candidate.split("(")[0].replace("C", "").strip())
         match = all_results[
             (all_results["_state"] == sel_state)
             & (all_results["_channel"] == sel_channel)
-            & (all_results["candidate_num"] == sel_candidate_num)
+            & (all_results["Iteration"] == sel_candidate)
         ]
         if match.empty:
             st.warning("No weekly candidate result is available for this selection.")
@@ -3416,7 +3282,7 @@ def render_tab_mmm_v9() -> None:
             st.plotly_chart(fig_detail, use_container_width=True, key="v9_detail_chart")
 
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Candidate", f"C{int(row['candidate_num'])} / Source {int(row['source_iter_num'])}")
+            m1.metric("Iteration", row["Iteration"])
             m2.metric("MAPE", f"{row['MAPE']:.2f}%")
             m3.metric("R²", f"{row['R. Sq']:.4f}")
             m4.metric("OOS RMSE", f"{row['OOS RMSE']:.2f}" if not np.isnan(row["OOS RMSE"]) else "N/A")
