@@ -3202,6 +3202,32 @@ def render_tab_mmm_v9() -> None:
         st.info("Click **▶ Run Weekly Rollout** to compute the 5 weekly candidates across the 11-state set.")
         return
 
+    # Streamlit Cloud can keep an older V9 result shape in session state after deploys.
+    # Normalize old/new column names so the tab can render without forcing a rerun.
+    all_results = all_results.copy()
+    v9_rename_map = {}
+    if "Iteration" not in all_results.columns:
+        if "Candidate" in all_results.columns:
+            v9_rename_map["Candidate"] = "Iteration"
+        elif "Source Iteration" in all_results.columns:
+            v9_rename_map["Source Iteration"] = "Iteration"
+    if "_state" not in all_results.columns and "State" in all_results.columns:
+        v9_rename_map["State"] = "_state"
+    if "_channel" not in all_results.columns and "Channel" in all_results.columns:
+        v9_rename_map["Channel"] = "_channel"
+    if v9_rename_map:
+        all_results = all_results.rename(columns=v9_rename_map)
+
+    required_v9_columns = ["Iteration", "_state", "_channel", "MAPE", "R. Sq", "RMSE", "OOS RMSE", "Coefficients"]
+    missing_v9_columns = [col for col in required_v9_columns if col not in all_results.columns]
+    if missing_v9_columns:
+        st.warning(
+            "Version 9 found older cached results that do not match the current layout. "
+            "Please click `▶ Run Weekly Rollout` once to refresh the table."
+        )
+        st.caption(f"Missing columns in cached V9 results: {', '.join(missing_v9_columns)}")
+        return
+
     sub_tabs = st.tabs([
         "📋 Full Table",
         "📈 State Wise",
