@@ -1965,29 +1965,42 @@ def render_tab_mmm_v5() -> None:
 _V6_FIXED_STATES = ["AL", "CA", "DE", "FL"]
 _V6_CHANNELS = ["DIGITAL", "PHYSICAL"]
 _V9_BASE_STATES = ["AL", "CA", "DE", "FL"]
-_V9_SOURCE_ITER_NUMS = [1, 4, 3, 10, 5]
-
-
-def _v9_make_weekly_label(label: str) -> str:
-    return (
-        label.replace("Bi-weekly", "Weekly")
-        .replace("bi-weekly", "weekly")
-    )
+_V9_WEEKLY_ITERATIONS = [
+    {
+        "source_iter_num": 1,
+        "label": "Weekly columns",
+    },
+    {
+        "source_iter_num": 4,
+        "label": "Weekly columns + Pre-screen spend split into (25, 50, 25) across weeks -1, 0, 1",
+    },
+    {
+        "source_iter_num": 10,
+        "label": "Weekly columns + Pre-screen front-weighted (75, 25, 0) across weeks 0, 1, 2 + LOG transformation on Prescreen",
+    },
+    {
+        "source_iter_num": 5,
+        "label": "Weekly columns + Pre-screen spend split into (25, 50, 25) across weeks -1, 0, 1 + SQRT transformation on Prescreen",
+    },
+    {
+        "source_iter_num": 3,
+        "label": "Weekly columns + Pre-screen spend split into (50, 25, 25) across weeks 0, 1, 2",
+    },
+]
 
 
 def _get_v9_shortlist_configs() -> list[dict]:
     source_lookup = {cfg["num"]: cfg for cfg in V6_ITERATIONS}
     configs: list[dict] = []
-    for idx, source_iter in enumerate(_V9_SOURCE_ITER_NUMS, start=1):
+    for idx, iteration_def in enumerate(_V9_WEEKLY_ITERATIONS, start=1):
+        source_iter = iteration_def["source_iter_num"]
         base_cfg = source_lookup[source_iter].copy()
-        weekly_label = _v9_make_weekly_label(source_lookup[source_iter]["label"])
         configs.append({
             **base_cfg,
-            "candidate_num": idx,
+            "iteration_order": idx,
             "source_iter_num": source_iter,
-            "source_label": weekly_label,
             "dummy_family": "weekly",
-            "label": f"{source_iter}. {weekly_label}",
+            "label": iteration_def["label"],
         })
     return configs
 
@@ -3131,11 +3144,11 @@ def render_tab_mmm_v9() -> None:
     render_version_intro(
         "Version 9 — Weekly State Rollout Workflow",
         [
-            "Uses the 5 shortlisted candidates from Version 6: source iterations 1, 4, 3, 10, and 5.",
+            "Uses 5 weekly iterations built from the shortlisted Version 6 logic.",
             "Runs them as a **weekly-only** workflow across 11 states × 2 channels = 110 configurations.",
             "State set = current 4 states plus the next 7 states from live two-channel NON-DM coverage.",
             "No region forecasts are progressed here; this tab is only for state-level weekly rollout decisions.",
-            "All 5 shortlisted iterations are forced to weekly dummy structure here, even where the original V6 label was bi-weekly.",
+            "All 5 iterations here use weekly dummy structure, including the transformed Prescreen variants.",
         ],
         note=f"Current weekly rollout states: {', '.join(target_states)}. Regions remain paused until business steer on definitions.",
     )
@@ -3279,7 +3292,7 @@ def render_tab_mmm_v9() -> None:
             & (all_results["Iteration"] == sel_candidate)
         ]
         if match.empty:
-            st.warning("No weekly candidate result is available for this selection.")
+            st.warning("No weekly iteration result is available for this selection.")
         else:
             row = match.iloc[0]
             res = row["_result"]
@@ -3299,7 +3312,7 @@ def render_tab_mmm_v9() -> None:
             if n_tr > 0:
                 fig_detail.add_vline(x=n_tr - 0.5, line_dash="dot", line_color="gray", annotation_text="Train | Test", annotation_position="top right")
             fig_detail.update_layout(
-                title=f"Weekly Candidate Detail — {sel_state} {sel_channel}",
+                title=f"Weekly Iteration Detail — {sel_state} {sel_channel}",
                 xaxis=dict(title="Period", tickmode="array", tickvals=x_all, ticktext=all_labels, tickangle=-90),
                 yaxis_title="NON_DM_APPLICATIONS",
                 height=420,
