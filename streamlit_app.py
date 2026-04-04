@@ -1964,6 +1964,52 @@ def render_tab_mmm_v5() -> None:
 
 _V6_FIXED_STATES = ["AL", "CA", "DE", "FL"]
 _V6_CHANNELS = ["DIGITAL", "PHYSICAL"]
+_V9_BASE_STATES = ["AL", "CA", "DE", "FL"]
+_V9_SOURCE_ITER_NUMS = [1, 4, 3, 10, 5]
+
+
+def _get_v9_shortlist_configs() -> list[dict]:
+    source_lookup = {cfg["num"]: cfg for cfg in V6_ITERATIONS}
+    configs: list[dict] = []
+    for idx, source_iter in enumerate(_V9_SOURCE_ITER_NUMS, start=1):
+        base_cfg = source_lookup[source_iter].copy()
+        configs.append({
+            **base_cfg,
+            "candidate_num": idx,
+            "source_iter_num": source_iter,
+            "source_label": source_lookup[source_iter]["label"],
+            "dummy_family": "weekly",
+            "label": f"Weekly Candidate {idx}",
+        })
+    return configs
+
+
+def _get_v9_target_states_and_rank() -> tuple[list[str], pd.DataFrame]:
+    digital = cached_build_v7_modeling_frame("DIGITAL")
+    physical = cached_build_v7_modeling_frame("PHYSICAL")
+    common_states = sorted(set(digital["STATE_CD"].dropna()) & set(physical["STATE_CD"].dropna()))
+
+    rows = []
+    for state in common_states:
+        total_apps = (
+            digital.loc[digital["STATE_CD"] == state, "NON_DM_APPLICATIONS"].sum()
+            + physical.loc[physical["STATE_CD"] == state, "NON_DM_APPLICATIONS"].sum()
+        )
+        rows.append({"State": state, "Combined Non-DM Applications": float(total_apps)})
+
+    rank_df = (
+        pd.DataFrame(rows)
+        .sort_values("Combined Non-DM Applications", ascending=False)
+        .reset_index(drop=True)
+    )
+    next_seven = [state for state in rank_df["State"].tolist() if state not in _V9_BASE_STATES][:7]
+    target_states = _V9_BASE_STATES + next_seven
+    rank_df["Group"] = np.where(
+        rank_df["State"].isin(_V9_BASE_STATES),
+        "Current 4",
+        np.where(rank_df["State"].isin(next_seven), "Next 7", "Other Available"),
+    )
+    return target_states, rank_df
 
 
 def render_tab_mmm_v6() -> None:
@@ -3061,6 +3107,328 @@ def render_tab_mmm_v8() -> None:
     )
 
 
+def render_tab_mmm_v9() -> None:
+    from utils import (
+        MARKETING_SPEND_PATH as _msp9,
+        ORIGINATIONS_V5_PATH as _op9,
+    )
+    from data_processing import DM_DIFF_PATH as _dm_diff9, fit_v6_iteration as _fit_v9, TACTIC_COLS_V5 as _v9_tactics
+
+    missing = [n for p, n in [(_msp9, _msp9.name), (_op9, _op9.name), (_dm_diff9, _dm_diff9.name)] if not p.exists()]
+    if missing:
+        st.error(f"Missing V9 input files: {', '.join(missing)}")
+        return
+
+    target_states, state_rank_df = _get_v9_target_states_and_rank()
+    shortlist = _get_v9_shortlist_configs()
+    roster_df = state_rank_df[state_rank_df["State"].isin(target_states)].copy()
+    roster_df["State Order"] = roster_df["State"].apply(lambda x: target_states.index(x) + 1 if x in target_states else np.nan)
+    roster_df = roster_df.sort_values("State Order").reset_index(drop=True)
+
+    render_version_intro(
+        "Version 9 — Weekly State Rollout Workflow",
+        [
+            "Uses the 5 shortlisted candidates from Version 6: source iterations 1, 4, 3, 10, and 5.",
+            "Runs them as a **weekly-only** workflow across 11 states × 2 channels = 110 configurations.",
+            "State set = current 4 states plus the next 7 states from live two-channel NON-DM coverage.",
+            "No region forecasts are progressed here; this tab is only for state-level weekly rollout decisions.",
+            "Ranks candidates using lower MAPE and higher R², then highlights the best weekly default for each state-channel combination.",
+        ],
+        note=f"Current weekly rollout states: {', '.join(target_states)}. Regions remain paused until business steer on definitions.",
+    )
+
+    st.markdown("**State Roster**")
+    st.dataframe(
+        roster_df[["State Order", "State", "Group", "Combined Non-DM Applications"]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "State Order": st.column_config.NumberColumn("Order", format="%d"),
+            "Combined Non-DM Applications": st.column_config.NumberColumn("Combined Non-DM Applications", format="%.0f"),
+        },
+    )
+
+    v9_run = st.button("▶ Run Weekly Rollout", key="v9_run")
+    if v9_run:
+        all_rows = []
+        with st.spinner("Running weekly-only shortlisted candidates across 11 states and 2 channels…"):
+            for _ch in _V6_CHANNELS:
+                try:
+                    _frame = cached_build_v7_modeling_frame(_ch)
+                except Exception as exc:
+                    st.warning(f"Could not build V9 frame for {_ch}: {exc}")
+                    continue
+                for _state in target_states:
+                    _edf = _frame[_frame["STATE_CD"] == _state].copy()
+                    _edf = _edf.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+                    for _cfg in shortlist:
+                        _res = _call_fit_v6_compat(_fit_v9, _edf, _ch, _cfg)
+                        if _res is None:
+                            continue
+                        _yte = _res["y_test_actual"]
+                        _ytp = _res["y_test_pred"]
+                        _oos_rmse = float(np.sqrt(np.mean((_yte - _ytp) ** 2))) if len(_yte) > 0 else np.nan
+                        _te_mask = _yte != 0
+                        _oos_mape = (
+                            float(np.mean(np.abs((_yte[_te_mask] - _ytp[_te_mask]) / _yte[_te_mask])) * 100)
+                            if _te_mask.any() else np.nan
+                        )
+                        _tac_coefs = [
+                            (f, float(c))
+                            for f, c in zip(_res["features"], _res["coefs"])
+                            if f in _res.get("tactic_cols", [])
+                        ]
+                        _coef_str = " | ".join(f"{f}: {c:.3f}" for f, c in _tac_coefs)
+                        all_rows.append({
+                            "candidate_num": _cfg["candidate_num"],
+                            "Candidate": _cfg["label"],
+                            "source_iter_num": _cfg["source_iter_num"],
+                            "Source Iteration": _cfg["source_label"],
+                            "_state": _state,
+                            "_channel": _ch,
+                            "MAPE": round(float(_res["MAPE"]), 2),
+                            "R. Sq": round(float(_res["R2"]), 4),
+                            "RMSE": round(float(_res["RMSE"]), 2),
+                            "OOS RMSE": round(_oos_rmse, 2) if not np.isnan(_oos_rmse) else np.nan,
+                            "OOS MAPE": round(_oos_mape, 2) if not np.isnan(_oos_mape) else np.nan,
+                            "Coefficients": _coef_str,
+                            "_result": _res,
+                        })
+        st.session_state["v9_all"] = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
+
+    all_results: pd.DataFrame | None = st.session_state.get("v9_all")
+    if all_results is None or all_results.empty:
+        st.info("Click **▶ Run Weekly Rollout** to compute the 5 weekly candidates across the 11-state set.")
+        return
+
+    sub_tabs = st.tabs([
+        "📊 Weekly Overview",
+        "🏆 Winners",
+        "📋 Detailed Table",
+        "📈 State Detail",
+    ])
+
+    with sub_tabs[0]:
+        summary = (
+            all_results.groupby(["candidate_num", "Candidate", "source_iter_num", "Source Iteration"], dropna=False)
+            .agg(
+                avg_mape=("MAPE", "mean"),
+                avg_rsq=("R. Sq", "mean"),
+                avg_rmse=("RMSE", "mean"),
+                avg_oos_rmse=("OOS RMSE", "mean"),
+                avg_oos_mape=("OOS MAPE", "mean"),
+            )
+            .reset_index()
+            .sort_values(["avg_mape", "avg_rsq"], ascending=[True, False])
+        )
+        best_idx = (
+            all_results.sort_values(["MAPE", "R. Sq"], ascending=[True, False])
+            .groupby(["_state", "_channel"], dropna=False)
+            .head(1)
+            .index
+        )
+        winners = all_results.loc[best_idx].copy().sort_values(["_state", "_channel"]).reset_index(drop=True)
+        winner_counts = (
+            winners.groupby(["candidate_num", "Candidate"], dropna=False)
+            .size()
+            .reset_index(name="win_count")
+        )
+        summary = summary.merge(winner_counts, on=["candidate_num", "Candidate"], how="left").fillna({"win_count": 0})
+        summary["win_count"] = summary["win_count"].astype(int)
+        best_overall = summary.iloc[0]
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Recommended Weekly Default", f"C{int(best_overall['candidate_num'])} (Source {int(best_overall['source_iter_num'])})")
+        mc2.metric("Best Avg MAPE", f"{best_overall['avg_mape']:.2f}%")
+        mc3.metric("Best Avg R²", f"{best_overall['avg_rsq']:.4f}")
+        mc4.metric("State-Channel Wins", f"{int(best_overall['win_count'])} / {len(target_states) * len(_V6_CHANNELS)}")
+
+        st.caption("Weekly-only ranking uses lower MAPE and higher R². This is the recommended shortlist view for rolling out to the remaining states.")
+
+        vc1, vc2 = st.columns(2)
+        with vc1:
+            fig_v9_mape = px.bar(
+                summary,
+                x="candidate_num",
+                y="avg_mape",
+                text_auto=".2f",
+                labels={"candidate_num": "Weekly Candidate #", "avg_mape": "Average MAPE (%)"},
+                title="Average MAPE by Weekly Candidate",
+                color_discrete_sequence=["#4C78A8"],
+            )
+            fig_v9_mape.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig_v9_mape, use_container_width=True, key="v9_avg_mape_chart")
+
+        with vc2:
+            fig_v9_r2 = px.bar(
+                summary,
+                x="candidate_num",
+                y="avg_rsq",
+                text_auto=".4f",
+                labels={"candidate_num": "Weekly Candidate #", "avg_rsq": "Average R²"},
+                title="Average R² by Weekly Candidate",
+                color_discrete_sequence=["#F58518"],
+            )
+            fig_v9_r2.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig_v9_r2, use_container_width=True, key="v9_avg_r2_chart")
+
+        st.markdown("**Weekly Candidate Summary**")
+        st.dataframe(
+            summary,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "candidate_num": st.column_config.NumberColumn("Candidate #", format="%d"),
+                "source_iter_num": st.column_config.NumberColumn("Source Iteration #", format="%d"),
+                "avg_mape": st.column_config.NumberColumn("Avg MAPE (%)", format="%.2f"),
+                "avg_rsq": st.column_config.NumberColumn("Avg R²", format="%.4f"),
+                "avg_rmse": st.column_config.NumberColumn("Avg RMSE", format="%.2f"),
+                "avg_oos_rmse": st.column_config.NumberColumn("Avg OOS RMSE", format="%.2f"),
+                "avg_oos_mape": st.column_config.NumberColumn("Avg OOS MAPE (%)", format="%.2f"),
+                "win_count": st.column_config.NumberColumn("Win Count", format="%d"),
+            },
+        )
+
+    with sub_tabs[1]:
+        winners = (
+            all_results.sort_values(["MAPE", "R. Sq"], ascending=[True, False])
+            .groupby(["_state", "_channel"], dropna=False)
+            .head(1)
+            .copy()
+            .sort_values(["_state", "_channel"])
+        )
+        winners["Group"] = winners["_state"].apply(lambda x: "Current 4" if x in _V9_BASE_STATES else "Next 7")
+        st.markdown("**Best Weekly Candidate by State and Channel**")
+        st.dataframe(
+            winners.rename(columns={
+                "_state": "State",
+                "_channel": "Channel",
+                "candidate_num": "Candidate #",
+                "source_iter_num": "Source Iteration #",
+            })[["Group", "State", "Channel", "Candidate #", "Source Iteration #", "MAPE", "R. Sq", "RMSE", "OOS RMSE"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Candidate #": st.column_config.NumberColumn("Candidate #", format="%d"),
+                "Source Iteration #": st.column_config.NumberColumn("Source Iteration #", format="%d"),
+                "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                "R. Sq": st.column_config.NumberColumn("R²", format="%.4f"),
+                "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
+                "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
+            },
+        )
+
+        win_counts = (
+            winners.groupby(["candidate_num", "Candidate"], dropna=False)
+            .size()
+            .reset_index(name="win_count")
+            .sort_values(["win_count", "candidate_num"], ascending=[False, True])
+        )
+        fig_wins = px.bar(
+            win_counts,
+            x="candidate_num",
+            y="win_count",
+            text_auto=True,
+            labels={"candidate_num": "Weekly Candidate #", "win_count": "State-Channel Wins"},
+            title="How Often Each Weekly Candidate Wins",
+            color_discrete_sequence=["#54A24B"],
+        )
+        fig_wins.update_layout(height=340, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_wins, use_container_width=True, key="v9_winner_counts_chart")
+
+    with sub_tabs[2]:
+        detail_df = all_results.copy()
+        detail_df["Group"] = detail_df["_state"].apply(lambda x: "Current 4" if x in _V9_BASE_STATES else "Next 7")
+        detail_df = detail_df.rename(columns={
+            "candidate_num": "Candidate #",
+            "source_iter_num": "Source Iteration #",
+            "Source Iteration": "Source Iteration",
+            "_state": "State",
+            "_channel": "Channel",
+        })
+        detail_df = detail_df[[
+            "Group", "State", "Channel", "Candidate #", "Candidate", "Source Iteration #", "Source Iteration",
+            "MAPE", "R. Sq", "RMSE", "OOS RMSE", "OOS MAPE", "Coefficients"
+        ]].sort_values(["Candidate #", "State", "Channel"])
+        st.dataframe(
+            detail_df,
+            use_container_width=True,
+            hide_index=True,
+            height=720,
+            column_config={
+                "Candidate #": st.column_config.NumberColumn("Candidate #", format="%d"),
+                "Source Iteration #": st.column_config.NumberColumn("Source Iteration #", format="%d"),
+                "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                "R. Sq": st.column_config.NumberColumn("R²", format="%.4f"),
+                "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
+                "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
+                "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
+                "Coefficients": st.column_config.TextColumn("Coefficients", width="large"),
+            },
+        )
+        st.caption("This table is the weekly production comparison set: 11 states × 2 channels × 5 weekly candidates. Region forecasts are intentionally excluded.")
+
+    with sub_tabs[3]:
+        dc1, dc2, dc3 = st.columns(3)
+        with dc1:
+            sel_state = st.selectbox("State", target_states, key="v9_detail_state")
+        with dc2:
+            sel_channel = st.selectbox("Channel", _V6_CHANNELS, key="v9_detail_channel")
+        with dc3:
+            sel_candidate = st.selectbox(
+                "Weekly Candidate",
+                [f"C{cfg['candidate_num']} (Source {cfg['source_iter_num']})" for cfg in shortlist],
+                key="v9_detail_candidate",
+            )
+        sel_candidate_num = int(sel_candidate.split("(")[0].replace("C", "").strip())
+        match = all_results[
+            (all_results["_state"] == sel_state)
+            & (all_results["_channel"] == sel_channel)
+            & (all_results["candidate_num"] == sel_candidate_num)
+        ]
+        if match.empty:
+            st.warning("No weekly candidate result is available for this selection.")
+        else:
+            row = match.iloc[0]
+            res = row["_result"]
+            tr_labels = [f"{int(r[0])}-W{int(r[1]):02d}" for r in res["train_periods"]]
+            te_labels = [f"{int(r[0])}-W{int(r[1]):02d}" for r in res["test_periods"]]
+            all_labels = tr_labels + te_labels
+            n_tr, n_te = len(tr_labels), len(te_labels)
+            x_tr = list(range(n_tr))
+            x_te = list(range(n_tr, n_tr + n_te))
+            x_all = list(range(n_tr + n_te))
+
+            fig_detail = go.Figure()
+            fig_detail.add_trace(go.Scatter(x=x_tr, y=res["y_train_actual"].tolist(), mode="lines", name="Actual (Train)", line=dict(color="#4C78A8", width=2)))
+            fig_detail.add_trace(go.Scatter(x=x_tr, y=res["y_train_pred"].tolist(), mode="lines", name="Predicted (Train)", line=dict(color="#4C78A8", width=2, dash="dash")))
+            fig_detail.add_trace(go.Scatter(x=x_te, y=res["y_test_actual"].tolist(), mode="lines", name="Actual (Test)", line=dict(color="#F58518", width=2)))
+            fig_detail.add_trace(go.Scatter(x=x_te, y=res["y_test_pred"].tolist(), mode="lines", name="Predicted (Test)", line=dict(color="#F58518", width=2, dash="dash")))
+            if n_tr > 0:
+                fig_detail.add_vline(x=n_tr - 0.5, line_dash="dot", line_color="gray", annotation_text="Train | Test", annotation_position="top right")
+            fig_detail.update_layout(
+                title=f"Weekly Candidate Detail — {sel_state} {sel_channel}",
+                xaxis=dict(title="Period", tickmode="array", tickvals=x_all, ticktext=all_labels, tickangle=-90),
+                yaxis_title="NON_DM_APPLICATIONS",
+                height=420,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_detail, use_container_width=True, key="v9_detail_chart")
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Candidate", f"C{int(row['candidate_num'])} / Source {int(row['source_iter_num'])}")
+            m2.metric("MAPE", f"{row['MAPE']:.2f}%")
+            m3.metric("R²", f"{row['R. Sq']:.4f}")
+            m4.metric("OOS RMSE", f"{row['OOS RMSE']:.2f}" if not np.isnan(row["OOS RMSE"]) else "N/A")
+
+            coef_rows = pd.DataFrame({
+                "Feature": res["features"],
+                "Coefficient": [round(float(c), 6) for c in res["coefs"]],
+                "Type": ["Tactic" if f in _v9_tactics else "Seasonal" for f in res["features"]],
+            })
+            st.dataframe(coef_rows, use_container_width=True, hide_index=True)
+
+
 # =============================================================================
 # Tab layout
 # =============================================================================
@@ -3075,6 +3443,7 @@ tabs = st.tabs([
     "📐 V6",
     "🧮 V7",
     "⚖️ V8",
+    "🚀 V9",
 ])
 
 with tabs[0]:
@@ -3106,3 +3475,6 @@ with tabs[8]:
 
 with tabs[9]:
     render_tab_mmm_v8()
+
+with tabs[10]:
+    render_tab_mmm_v9()
