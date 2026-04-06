@@ -19,13 +19,22 @@ MARKETING_SPEND_CANDIDATES = [
     ROOT / "Marketing Spend Data.csv",
     ROOT / "Marketing_Spend_Data.csv",
     ROOT / "Marketing Spend Data (1).csv",
+    Path.home() / "Downloads" / "Marketing Spend Data.csv",
+    Path.home() / "Downloads" / "Marketing_Spend_Data.csv",
+    Path.home() / "Downloads" / "Marketing Spend Data (1).csv",
 ]
 ORIGINATIONS_CANDIDATES = [
     ROOT / "Originations Data1 (1).xlsx",
     ROOT / "Originations Data1.xlsx",
+    ROOT / "Originations_Data1_1.xlsx",
+    ROOT / "Originations_Data1.xlsx",
     ROOT / "Originations Data.xlsx",
     ROOT / "Originations_Data.xlsx",
     ROOT / "Originations_Data.csv",
+    Path.home() / "Downloads" / "Originations Data1 (1).xlsx",
+    Path.home() / "Downloads" / "Originations Data1.xlsx",
+    Path.home() / "Downloads" / "Originations_Data1_1.xlsx",
+    Path.home() / "Downloads" / "Originations_Data1.xlsx",
 ]
 DM_DATA_CANDIDATES = [
     ROOT / "DM Data.csv",
@@ -45,6 +54,11 @@ DM_DATA_PATH = next(
     (path for path in DM_DATA_CANDIDATES if path.exists()),
     DM_DATA_CANDIDATES[0],
 )
+MODELING_FILE_DIGITAL_PATH = ROOT / "ModelingFile_Digital.csv"
+DIGITAL_MODEL_ARTIFACTS_DIR = ROOT / "digital_model_artifacts"
+PHYSICAL_WEEKLY_ITERATIONS_PATH = ROOT / "Weekly_All_Iterations.csv"
+PHYSICAL_ALL_STATES_ITERATIONS_PATH = ROOT / "All_states_iterations.csv"
+BUILD_STATE_DIVISION_MODELS_PATH = ROOT / "build_state_division_models.py"
 
 TACTIC_COLUMNS = [
     "DSP",
@@ -188,6 +202,9 @@ ORIGINATIONS_V5_CANDIDATES = [
     ROOT / "Originations_Data1_1.xlsx",
     ROOT / "Originations_Data1.xlsx",
     ROOT / "Originations Data1 (1).xlsx",
+    Path.home() / "Downloads" / "Originations_Data1_1.xlsx",
+    Path.home() / "Downloads" / "Originations_Data1.xlsx",
+    Path.home() / "Downloads" / "Originations Data1 (1).xlsx",
 ]
 DIAGNOSTICS_DIGITAL_PATH = next(
     (p for p in DIAGNOSTICS_DIGITAL_CANDIDATES if p.exists()),

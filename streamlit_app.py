@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import importlib.util
 from pathlib import Path
 
 import data_processing as dp
@@ -49,17 +50,24 @@ run_all_configs_for_entity = getattr(dp, "run_all_configs_for_entity", None)
 run_ols_configs_for_entity = getattr(dp, "run_ols_configs_for_entity", None)
 run_v6_iterations_for_entity = getattr(dp, "run_v6_iterations_for_entity", None)
 V6_ITERATIONS = getattr(dp, "V6_ITERATIONS", [])
+TACTIC_COLS_V5 = getattr(dp, "TACTIC_COLS_V5", ["DSP", "LeadGen", "Paid Search", "Paid Social", "Prescreen", "Referrals"])
 summarize_dm_data = dp.summarize_dm_data
 from modeling import fit_channel_models
 from utils import (
+    BUILD_STATE_DIVISION_MODELS_PATH,
     CHANNELS,
     DEFAULT_DATA_PATH,
     DIAGNOSTICS_DIGITAL_PATH,
     DIAGNOSTICS_PHYSICAL_PATH,
+    DIGITAL_MODEL_ARTIFACTS_DIR,
     DM_DATA_PATH,
     MARKETING_SPEND_PATH,
+    MODELING_FILE_DIGITAL_PATH,
     ORIGINATIONS_PATH,
+    ORIGINATIONS_V5_PATH,
     OUTCOME_COLUMNS,
+    PHYSICAL_ALL_STATES_ITERATIONS_PATH,
+    PHYSICAL_WEEKLY_ITERATIONS_PATH,
     PRODUCT_ALL_LABEL,
     TACTIC_COLUMNS,
     TIME_GRAINS,
@@ -238,6 +246,144 @@ def auto_prepare_v3_dataset(time_grain: str = "Weekly") -> pd.DataFrame:
     marketing = load_marketing_spend_data(MARKETING_SPEND_PATH, fallback_source=DEFAULT_DATA_PATH)
     originations = load_originations_data(ORIGINATIONS_PATH, fallback_source=DEFAULT_DATA_PATH)
     return prepare_raw_mmm_dataset(marketing, originations, time_grain=time_grain)
+
+
+@st.cache_resource(show_spinner=False)
+def load_v10_pipeline_module():
+    if not BUILD_STATE_DIVISION_MODELS_PATH.exists():
+        raise FileNotFoundError(BUILD_STATE_DIVISION_MODELS_PATH.name)
+    spec = importlib.util.spec_from_file_location(
+        "build_state_division_models_runtime",
+        BUILD_STATE_DIVISION_MODELS_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load {BUILD_STATE_DIVISION_MODELS_PATH.name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def get_v10_digital_required_columns() -> list[str]:
+    weekly = [f"W_{idx}" for idx in range(1, 53)]
+    fortnight = [f"F_{idx}" for idx in range(26)]
+    fourier = ["sin_1", "cos_1", "sin_2", "cos_2"]
+    return [
+        "ISO_YEAR",
+        "ISO_WEEK",
+        "STATE_CD",
+        "Division",
+        "NON_DM_APPLICATIONS",
+        *TACTIC_COLS_V5,
+        *weekly,
+        *fortnight,
+        *fourier,
+    ]
+
+
+def build_v10_digital_modeling_file() -> tuple[pd.DataFrame, Path]:
+    frame = build_v7_modeling_frame("DIGITAL").copy()
+    required_cols = get_v10_digital_required_columns()
+    for col in required_cols:
+        if col not in frame.columns:
+            frame[col] = 0.0
+    export_df = frame[required_cols].copy()
+    export_df = export_df.sort_values(["STATE_CD", "ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+    export_df.to_csv(MODELING_FILE_DIGITAL_PATH, index=False)
+    return export_df, MODELING_FILE_DIGITAL_PATH
+
+
+def summarize_v10_physical_runs(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if run_v6_iterations_for_entity is None:
+        raise ValueError("Physical iteration pipeline is not available in this deployment.")
+
+    states = sorted(frame["STATE_CD"].dropna().astype(str).unique().tolist())
+    all_rows: list[dict] = []
+
+    for state in states:
+        diag_df = run_v6_iterations_for_entity(frame, "state", state, "PHYSICAL")
+        if diag_df is None or diag_df.empty:
+            continue
+        for _, row in diag_df.iterrows():
+            result = row["_result"]
+            y_test = np.asarray(result["y_test_actual"], dtype=float)
+            y_pred = np.asarray(result["y_test_pred"], dtype=float)
+            if len(y_test) > 0:
+                oos_rmse = float(np.sqrt(np.mean((y_test - y_pred) ** 2)))
+                mask = y_test != 0
+                oos_mape = float(np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100) if mask.any() else np.nan
+            else:
+                oos_rmse = np.nan
+                oos_mape = np.nan
+
+            all_rows.append({
+                "Iteration": int(row["iteration"]),
+                "Iteration Name": row["label"],
+                "State": state,
+                "Channel": "PHYSICAL",
+                "MAPE": float(row["MAPE"]),
+                "R.Sq": float(row["R2"]),
+                "RMSE": float(row["RMSE"]),
+                "OOS RMSE": oos_rmse,
+                "OOS MAPE": oos_mape,
+                "Test_R2": float(row["Test_R2"]),
+            })
+
+    all_df = pd.DataFrame(all_rows)
+    if all_df.empty:
+        return all_df, all_df
+
+    all_df = all_df.sort_values(["State", "Iteration"]).reset_index(drop=True)
+    all_df.to_csv(PHYSICAL_WEEKLY_ITERATIONS_PATH, index=False)
+    all_df.to_csv(PHYSICAL_ALL_STATES_ITERATIONS_PATH, index=False)
+
+    best_df = (
+        all_df.sort_values(["State", "OOS MAPE", "R.Sq", "Iteration"], ascending=[True, True, False, True])
+        .groupby("State", as_index=False)
+        .first()
+        .reset_index(drop=True)
+    )
+    best_df["Needs Review"] = np.where(best_df["OOS MAPE"] > 40, "Yes", "No")
+    return all_df, best_df
+
+
+def run_v10_combined_pipeline() -> dict[str, pd.DataFrame | str]:
+    digital_export_df, modeling_path = build_v10_digital_modeling_file()
+    module = load_v10_pipeline_module()
+    digital_states = sorted(digital_export_df["STATE_CD"].dropna().astype(str).unique().tolist())
+
+    digital_diag = module.run_model_pipeline(
+        input_path=str(modeling_path),
+        output_dir=str(DIGITAL_MODEL_ARTIFACTS_DIR),
+        selected_states=digital_states,
+        selected_divisions=["__SKIP_DIVISIONS__"],
+        methodologies=["OLS", "weekly"],
+        media_transform_config={
+            "DSP": {"alpha": 0.3, "saturation": "log1p"},
+            "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
+        },
+        optional_features=["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
+        backtest_mode="rolling_one_step_fixed_window",
+        fixed_window_weeks=104,
+    )
+
+    digital_summary = (
+        digital_diag.loc[digital_diag["scope"] == "state", ["entity", "MAPE", "Test_R2", "dummy_family"]]
+        .rename(columns={"entity": "State"})
+        .sort_values("State")
+        .reset_index(drop=True)
+    )
+    digital_summary["Needs Review"] = np.where(digital_summary["Test_R2"] < 0, "Yes", "No")
+
+    physical_frame = build_v7_modeling_frame("PHYSICAL").copy()
+    physical_all, physical_summary = summarize_v10_physical_runs(physical_frame)
+
+    return {
+        "digital_modeling_file": str(modeling_path),
+        "digital_summary": digital_summary,
+        "digital_diagnostics": digital_diag,
+        "physical_all": physical_all,
+        "physical_summary": physical_summary,
+    }
 
 
 @st.cache_data(show_spinner="Preparing V4 rolled-up dataset…")
@@ -3334,6 +3480,130 @@ def render_tab_mmm_v9() -> None:
             st.dataframe(coef_rows, use_container_width=True, hide_index=True)
 
 
+def render_tab_mmm_v10() -> None:
+    missing = [
+        path.name
+        for path in [MARKETING_SPEND_PATH, ORIGINATIONS_V5_PATH, BUILD_STATE_DIVISION_MODELS_PATH]
+        if not path.exists()
+    ]
+    dm_diff_path = getattr(dp, "DM_DIFF_PATH", None)
+    if dm_diff_path is not None and not Path(dm_diff_path).exists():
+        missing.append(Path(dm_diff_path).name)
+
+    render_version_intro(
+        "Version 10 — Digital New Pipeline, Physical Old Pipeline",
+        [
+            "Builds a DIGITAL-only modeling CSV from `build_v7_modeling_frame(\"DIGITAL\")` with the exact weekly, fortnightly, and Fourier columns needed by the new state modeling pipeline.",
+            "Runs DIGITAL through `build_state_division_models.py` using OLS + weekly dummies only, rolling one-step fixed-window backtesting, and the requested DSP / Prescreen media transforms.",
+            "Keeps PHYSICAL on the existing iteration-based NON-DM pipeline exactly as it already works today. PHYSICAL is not passed through the new state/division model file.",
+            "Saves DIGITAL outputs to `digital_model_artifacts/consolidated_model_diagnostics.csv` and keeps PHYSICAL iteration outputs in the existing all-iterations CSV files.",
+            "Shows a final state summary and flags DIGITAL states with negative Test R² and PHYSICAL states with OOS MAPE above 40%.",
+        ],
+        note="Important: `media_transform_config` only works for variables already inside the new pipeline's `media_predictors` list. DSP and Prescreen are included by default, so V10 does not override `media_predictors`.",
+    )
+
+    st.caption(
+        f"Digital modeling file: `{MODELING_FILE_DIGITAL_PATH.name}` | "
+        f"Digital artifacts: `{DIGITAL_MODEL_ARTIFACTS_DIR.name}/` | "
+        f"Physical outputs: `{PHYSICAL_WEEKLY_ITERATIONS_PATH.name}`, `{PHYSICAL_ALL_STATES_ITERATIONS_PATH.name}`"
+    )
+
+    if missing:
+        st.error(f"Missing Version 10 input files: {', '.join(sorted(set(missing)))}")
+        return
+
+    run_v10 = st.button("▶ Run V10 for All States", key="v10_run")
+    if run_v10:
+        try:
+            with st.spinner("Running DIGITAL through the new pipeline and PHYSICAL through the existing iteration workflow…"):
+                st.session_state["v10_results"] = run_v10_combined_pipeline()
+        except Exception as exc:
+            st.error(f"Version 10 run failed: {exc}")
+            return
+
+    results = st.session_state.get("v10_results")
+    if not results:
+        st.info("Click **▶ Run V10 for All States** to generate the DIGITAL modeling file, run both channel workflows, and save the separate outputs.")
+        return
+
+    digital_summary = results["digital_summary"].copy()
+    physical_summary = results["physical_summary"].copy()
+    physical_all = results["physical_all"].copy()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Digital States", f"{len(digital_summary):,}")
+    k2.metric("Digital Flags", f"{int((digital_summary['Needs Review'] == 'Yes').sum()):,}")
+    k3.metric("Physical States", f"{len(physical_summary):,}")
+    k4.metric("Physical Flags", f"{int((physical_summary['Needs Review'] == 'Yes').sum()):,}")
+
+    sub_tabs = st.tabs(["💻 Digital Summary", "🏛️ Physical Summary", "📁 Saved Outputs"])
+
+    with sub_tabs[0]:
+        st.markdown("**Digital — new state pipeline summary**")
+        st.dataframe(
+            digital_summary,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
+            },
+        )
+        flagged_digital = digital_summary[digital_summary["Needs Review"] == "Yes"]
+        if flagged_digital.empty:
+            st.success("All Digital states cleared the Test R² check.")
+        else:
+            st.warning(
+                "Digital states needing review (Test R² < 0): "
+                + ", ".join(flagged_digital["State"].astype(str).tolist())
+            )
+
+    with sub_tabs[1]:
+        st.markdown("**Physical — existing iteration pipeline summary**")
+        st.dataframe(
+            physical_summary[["State", "Iteration", "Iteration Name", "OOS MAPE", "R.Sq", "Needs Review"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
+                "R.Sq": st.column_config.NumberColumn("R²", format="%.4f"),
+            },
+        )
+        flagged_physical = physical_summary[physical_summary["Needs Review"] == "Yes"]
+        if flagged_physical.empty:
+            st.success("All Physical states stayed within the existing OOS MAPE threshold.")
+        else:
+            st.warning(
+                "Physical states needing review (OOS MAPE > 40%): "
+                + ", ".join(flagged_physical["State"].astype(str).tolist())
+            )
+        with st.expander("📋 Physical all-iteration detail"):
+            st.dataframe(
+                physical_all,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                    "R.Sq": st.column_config.NumberColumn("R²", format="%.4f"),
+                    "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
+                    "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
+                    "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
+                    "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
+                },
+            )
+
+    with sub_tabs[2]:
+        output_df = pd.DataFrame(
+            [
+                {"Output": "Digital modeling file", "Path": results["digital_modeling_file"]},
+                {"Output": "Digital diagnostics", "Path": str(DIGITAL_MODEL_ARTIFACTS_DIR / "consolidated_model_diagnostics.csv")},
+                {"Output": "Physical iterations", "Path": str(PHYSICAL_WEEKLY_ITERATIONS_PATH)},
+                {"Output": "Physical all states", "Path": str(PHYSICAL_ALL_STATES_ITERATIONS_PATH)},
+            ]
+        )
+        st.dataframe(output_df, use_container_width=True, hide_index=True)
+
+
 # =============================================================================
 # Tab layout
 # =============================================================================
@@ -3349,6 +3619,7 @@ tabs = st.tabs([
     "🧮 V7",
     "⚖️ V8",
     "🚀 V9",
+    "🧭 V10",
 ])
 
 with tabs[0]:
@@ -3383,3 +3654,6 @@ with tabs[9]:
 
 with tabs[10]:
     render_tab_mmm_v9()
+
+with tabs[11]:
+    render_tab_mmm_v10()
