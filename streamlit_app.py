@@ -409,6 +409,52 @@ def run_v10_combined_pipeline() -> dict[str, pd.DataFrame | str]:
     }
 
 
+def normalize_v10_digital_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    out = df.copy()
+    rename_map = {
+        "entity": "State",
+        "R.Sq": "R2",
+        "R2_train": "R2",
+        "Adj R2": "AdjR2",
+        "Adj R. Sq": "AdjR2",
+        "Test R2": "Test_R2",
+    }
+    available = {src: dst for src, dst in rename_map.items() if src in out.columns and dst not in out.columns}
+    if available:
+        out = out.rename(columns=available)
+    for col in ["State", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "dummy_family"]:
+        if col not in out.columns:
+            out[col] = np.nan
+    if "Needs Review" not in out.columns:
+        out["Needs Review"] = np.where(pd.to_numeric(out["Test_R2"], errors="coerce") < 0, "Yes", "No")
+    return out
+
+
+def normalize_v10_physical_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    out = df.copy()
+    rename_map = {
+        "entity": "State",
+        "label": "Iteration Name",
+        "iteration": "Iteration",
+        "R.Sq": "R2",
+        "R. Sq": "R2",
+        "Test R2": "Test_R2",
+    }
+    available = {src: dst for src, dst in rename_map.items() if src in out.columns and dst not in out.columns}
+    if available:
+        out = out.rename(columns=available)
+    for col in ["State", "Iteration", "Iteration Name", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "OOS MAPE"]:
+        if col not in out.columns:
+            out[col] = np.nan
+    if "Needs Review" not in out.columns:
+        out["Needs Review"] = np.where(pd.to_numeric(out["OOS MAPE"], errors="coerce") > 40, "Yes", "No")
+    return out
+
+
 @st.cache_data(show_spinner="Preparing V4 rolled-up dataset…")
 def auto_prepare_v4_dataset(time_grain: str = "Weekly") -> pd.DataFrame:
     marketing = load_marketing_spend_data(MARKETING_SPEND_PATH, fallback_source=DEFAULT_DATA_PATH)
@@ -3549,9 +3595,16 @@ def render_tab_mmm_v10() -> None:
         st.info("Click **▶ Run V10 for All States** to generate the DIGITAL modeling file, run both channel workflows, and save the separate outputs.")
         return
 
-    digital_summary = results["digital_summary"].copy()
-    physical_summary = results["physical_summary"].copy()
-    physical_all = results["physical_all"].copy()
+    digital_summary = normalize_v10_digital_summary(results.get("digital_summary"))
+    physical_summary = normalize_v10_physical_summary(results.get("physical_summary"))
+    physical_all = normalize_v10_physical_summary(results.get("physical_all"))
+
+    if digital_summary.empty and physical_summary.empty:
+        st.warning(
+            "Version 10 found older cached results that do not match the current layout. "
+            "Please click `▶ Run V10 for All States` once to refresh the results."
+        )
+        return
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Digital States", f"{len(digital_summary):,}")
