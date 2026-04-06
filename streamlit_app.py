@@ -409,9 +409,12 @@ def run_v10_combined_pipeline() -> dict[str, pd.DataFrame | str]:
     }
 
 
-def normalize_v10_digital_summary(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_v10_digital_summary(
+    df: pd.DataFrame | None,
+    diagnostics_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if df is None:
-        return pd.DataFrame()
+        df = pd.DataFrame()
     out = df.copy()
     rename_map = {
         "entity": "State",
@@ -424,6 +427,19 @@ def normalize_v10_digital_summary(df: pd.DataFrame) -> pd.DataFrame:
     available = {src: dst for src, dst in rename_map.items() if src in out.columns and dst not in out.columns}
     if available:
         out = out.rename(columns=available)
+    if diagnostics_df is not None and not diagnostics_df.empty:
+        diag = diagnostics_df.copy()
+        diag_rename = {src: dst for src, dst in rename_map.items() if src in diag.columns and dst not in diag.columns}
+        if diag_rename:
+            diag = diag.rename(columns=diag_rename)
+        needed = ["State", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "dummy_family"]
+        missing_needed = [col for col in needed if col not in out.columns or out[col].isna().all()]
+        if missing_needed and all(col in diag.columns for col in needed):
+            out = (
+                diag.loc[diag["scope"] == "state", needed]
+                .sort_values("State")
+                .reset_index(drop=True)
+            )
     for col in ["State", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "dummy_family"]:
         if col not in out.columns:
             out[col] = np.nan
@@ -432,9 +448,12 @@ def normalize_v10_digital_summary(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def normalize_v10_physical_summary(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_v10_physical_summary(
+    df: pd.DataFrame | None,
+    all_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if df is None:
-        return pd.DataFrame()
+        df = pd.DataFrame()
     out = df.copy()
     rename_map = {
         "entity": "State",
@@ -447,6 +466,20 @@ def normalize_v10_physical_summary(df: pd.DataFrame) -> pd.DataFrame:
     available = {src: dst for src, dst in rename_map.items() if src in out.columns and dst not in out.columns}
     if available:
         out = out.rename(columns=available)
+    if all_df is not None and not all_df.empty:
+        base = all_df.copy()
+        base_rename = {src: dst for src, dst in rename_map.items() if src in base.columns and dst not in base.columns}
+        if base_rename:
+            base = base.rename(columns=base_rename)
+        needed = ["State", "Iteration", "Iteration Name", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "OOS MAPE"]
+        missing_needed = [col for col in needed if col not in out.columns or out[col].isna().all()]
+        if missing_needed and all(col in base.columns for col in needed):
+            out = (
+                base.sort_values(["State", "OOS MAPE", "R2", "Iteration"], ascending=[True, True, False, True])
+                .groupby("State", as_index=False)
+                .first()
+                .reset_index(drop=True)
+            )
     for col in ["State", "Iteration", "Iteration Name", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "OOS MAPE"]:
         if col not in out.columns:
             out[col] = np.nan
@@ -3595,9 +3628,15 @@ def render_tab_mmm_v10() -> None:
         st.info("Click **▶ Run V10 for All States** to generate the DIGITAL modeling file, run both channel workflows, and save the separate outputs.")
         return
 
-    digital_summary = normalize_v10_digital_summary(results.get("digital_summary"))
-    physical_summary = normalize_v10_physical_summary(results.get("physical_summary"))
+    digital_summary = normalize_v10_digital_summary(
+        results.get("digital_summary"),
+        diagnostics_df=results.get("digital_diagnostics"),
+    )
     physical_all = normalize_v10_physical_summary(results.get("physical_all"))
+    physical_summary = normalize_v10_physical_summary(
+        results.get("physical_summary"),
+        all_df=physical_all,
+    )
 
     if digital_summary.empty and physical_summary.empty:
         st.warning(
