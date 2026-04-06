@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import utils as ut
 from sklearn.linear_model import LinearRegression
 
 try:
@@ -53,28 +54,43 @@ V6_ITERATIONS = getattr(dp, "V6_ITERATIONS", [])
 TACTIC_COLS_V5 = getattr(dp, "TACTIC_COLS_V5", ["DSP", "LeadGen", "Paid Search", "Paid Social", "Prescreen", "Referrals"])
 summarize_dm_data = dp.summarize_dm_data
 from modeling import fit_channel_models
-from utils import (
-    BUILD_STATE_DIVISION_MODELS_PATH,
-    CHANNELS,
-    DEFAULT_DATA_PATH,
-    DIAGNOSTICS_DIGITAL_PATH,
-    DIAGNOSTICS_PHYSICAL_PATH,
-    DIGITAL_MODEL_ARTIFACTS_DIR,
-    DM_DATA_PATH,
-    MARKETING_SPEND_PATH,
-    MODELING_FILE_DIGITAL_PATH,
-    ORIGINATIONS_PATH,
-    ORIGINATIONS_V5_PATH,
-    OUTCOME_COLUMNS,
-    PHYSICAL_ALL_STATES_ITERATIONS_PATH,
-    PHYSICAL_WEEKLY_ITERATIONS_PATH,
-    PRODUCT_ALL_LABEL,
-    TACTIC_COLUMNS,
-    TIME_GRAINS,
-    expand_rollup_product,
-    format_metric,
-    get_available_products,
-    get_available_rolled_up_products,
+
+CHANNELS = getattr(ut, "CHANNELS", ("DIGITAL", "PHYSICAL"))
+DEFAULT_DATA_PATH = getattr(ut, "DEFAULT_DATA_PATH", Path("All_States_modeling_v2.xlsx"))
+DIAGNOSTICS_DIGITAL_PATH = getattr(ut, "DIAGNOSTICS_DIGITAL_PATH", Path("consolidated_model_diagnostics_digital.xlsx"))
+DIAGNOSTICS_PHYSICAL_PATH = getattr(ut, "DIAGNOSTICS_PHYSICAL_PATH", Path("consolidated_model_diagnostics_physical.xlsx"))
+DM_DATA_PATH = getattr(ut, "DM_DATA_PATH", Path("DM Data.csv"))
+MARKETING_SPEND_PATH = getattr(ut, "MARKETING_SPEND_PATH", Path("Marketing Spend Data.csv"))
+ORIGINATIONS_PATH = getattr(ut, "ORIGINATIONS_PATH", Path("Originations Data1 (1).xlsx"))
+ORIGINATIONS_V5_PATH = getattr(ut, "ORIGINATIONS_V5_PATH", ORIGINATIONS_PATH)
+OUTCOME_COLUMNS = getattr(ut, "OUTCOME_COLUMNS", ["APPLICATIONS", "APPROVED", "ORIGINATIONS"])
+PRODUCT_ALL_LABEL = getattr(ut, "PRODUCT_ALL_LABEL", "All Products")
+TACTIC_COLUMNS = getattr(
+    ut,
+    "TACTIC_COLUMNS",
+    ["DSP", "LeadGen", "Paid Search", "Paid Social", "Prescreen", "Referrals", "Sweepstakes"],
+)
+TIME_GRAINS = getattr(ut, "TIME_GRAINS", ("Weekly", "Fortnight"))
+expand_rollup_product = getattr(ut, "expand_rollup_product")
+format_metric = getattr(ut, "format_metric")
+get_available_products = getattr(ut, "get_available_products")
+get_available_rolled_up_products = getattr(ut, "get_available_rolled_up_products")
+
+ROOT_DIR = getattr(ut, "ROOT", Path(__file__).resolve().parent)
+BUILD_STATE_DIVISION_MODELS_PATH = getattr(
+    ut, "BUILD_STATE_DIVISION_MODELS_PATH", ROOT_DIR / "build_state_division_models.py"
+)
+DIGITAL_MODEL_ARTIFACTS_DIR = getattr(
+    ut, "DIGITAL_MODEL_ARTIFACTS_DIR", ROOT_DIR / "digital_model_artifacts"
+)
+MODELING_FILE_DIGITAL_PATH = getattr(
+    ut, "MODELING_FILE_DIGITAL_PATH", ROOT_DIR / "ModelingFile_Digital.csv"
+)
+PHYSICAL_WEEKLY_ITERATIONS_PATH = getattr(
+    ut, "PHYSICAL_WEEKLY_ITERATIONS_PATH", ROOT_DIR / "Weekly_All_Iterations.csv"
+)
+PHYSICAL_ALL_STATES_ITERATIONS_PATH = getattr(
+    ut, "PHYSICAL_ALL_STATES_ITERATIONS_PATH", ROOT_DIR / "All_states_iterations.csv"
 )
 
 # ---------------------------------------------------------------------------
