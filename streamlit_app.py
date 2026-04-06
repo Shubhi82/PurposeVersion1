@@ -145,8 +145,7 @@ V10_PRESETS: dict = {
             "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
         },
         "note": (
-            "DSP α=0.3, Prescreen α=0.7, log1p saturation on both, 4-week trailing average. "
-            "Matches the offline consolidated_model_diagnostics_Digital.xlsx exactly."
+            "DSP α=0.3, Prescreen α=0.7, log1p saturation on both, 4-week trailing average."
         ),
     },
     "Config 3 — DSP α=0.5 · Prescreen α=0.6 · log1p · 4w avg": {
