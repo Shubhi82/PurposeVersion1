@@ -129,12 +129,13 @@ ADSTOCK_COLS     = ["DSP", "LeadGen", "Paid Search", "Paid Social", "Referrals",
 # V10 MMM Constants
 # ---------------------------------------------------------------------------
 V10_PRESETS: dict = {
-    "Config 1 — No adstock  (baseline, raw spend)": {
-        "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
+    "Config 1 — No adstock · no trailing avg  (baseline)": {
+        "optional_features": ["time_index_sq"],
         "media_transform_config": {},
         "note": (
-            "Raw DSP and Prescreen spend — no carryover effect applied. "
-            "Use this as the zero-adstock baseline to see whether carryover improves fit."
+            "Pure baseline — raw DSP and Prescreen spend with no adstock carryover and no "
+            "trailing average of NON_DM_APPLICATIONS. Only time_index_sq is included as an "
+            "optional feature. Use this to isolate the contribution of adstock and trailing avg."
         ),
     },
     "Config 2 — DSP α=0.3 · Prescreen α=0.7 · log1p · 4w avg": {
