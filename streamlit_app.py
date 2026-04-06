@@ -338,12 +338,14 @@ def summarize_v10_physical_runs(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
                 "Iteration Name": row["label"],
                 "State": state,
                 "Channel": "PHYSICAL",
+                "R2": float(row["R2"]),
+                "AdjR2": float(row["AdjR2"]),
+                "MAE": float(row["MAE"]),
                 "MAPE": float(row["MAPE"]),
-                "R.Sq": float(row["R2"]),
                 "RMSE": float(row["RMSE"]),
+                "Test_R2": float(row["Test_R2"]),
                 "OOS RMSE": oos_rmse,
                 "OOS MAPE": oos_mape,
-                "Test_R2": float(row["Test_R2"]),
             })
 
     all_df = pd.DataFrame(all_rows)
@@ -355,7 +357,7 @@ def summarize_v10_physical_runs(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
     all_df.to_csv(PHYSICAL_ALL_STATES_ITERATIONS_PATH, index=False)
 
     best_df = (
-        all_df.sort_values(["State", "OOS MAPE", "R.Sq", "Iteration"], ascending=[True, True, False, True])
+        all_df.sort_values(["State", "OOS MAPE", "R2", "Iteration"], ascending=[True, True, False, True])
         .groupby("State", as_index=False)
         .first()
         .reset_index(drop=True)
@@ -385,7 +387,10 @@ def run_v10_combined_pipeline() -> dict[str, pd.DataFrame | str]:
     )
 
     digital_summary = (
-        digital_diag.loc[digital_diag["scope"] == "state", ["entity", "MAPE", "Test_R2", "dummy_family"]]
+        digital_diag.loc[
+            digital_diag["scope"] == "state",
+            ["entity", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "dummy_family"],
+        ]
         .rename(columns={"entity": "State"})
         .sort_values("State")
         .reset_index(drop=True)
@@ -3563,7 +3568,11 @@ def render_tab_mmm_v10() -> None:
             use_container_width=True,
             hide_index=True,
             column_config={
+                "R2": st.column_config.NumberColumn("R2", format="%.4f"),
+                "AdjR2": st.column_config.NumberColumn("AdjR2", format="%.4f"),
+                "MAE": st.column_config.NumberColumn("MAE", format="%.2f"),
                 "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
                 "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
             },
         )
@@ -3579,12 +3588,19 @@ def render_tab_mmm_v10() -> None:
     with sub_tabs[1]:
         st.markdown("**Physical — existing iteration pipeline summary**")
         st.dataframe(
-            physical_summary[["State", "Iteration", "Iteration Name", "OOS MAPE", "R.Sq", "Needs Review"]],
+            physical_summary[
+                ["State", "Iteration", "Iteration Name", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "OOS MAPE", "Needs Review"]
+            ],
             use_container_width=True,
             hide_index=True,
             column_config={
+                "R2": st.column_config.NumberColumn("R2", format="%.4f"),
+                "AdjR2": st.column_config.NumberColumn("AdjR2", format="%.4f"),
+                "MAE": st.column_config.NumberColumn("MAE", format="%.2f"),
+                "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
+                "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
                 "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
-                "R.Sq": st.column_config.NumberColumn("R²", format="%.4f"),
             },
         )
         flagged_physical = physical_summary[physical_summary["Needs Review"] == "Yes"]
@@ -3601,12 +3617,15 @@ def render_tab_mmm_v10() -> None:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
+                    "R2": st.column_config.NumberColumn("R2", format="%.4f"),
+                    "AdjR2": st.column_config.NumberColumn("AdjR2", format="%.4f"),
+                    "MAE": st.column_config.NumberColumn("MAE", format="%.2f"),
                     "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
-                    "R.Sq": st.column_config.NumberColumn("R²", format="%.4f"),
+                    "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
+                    "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
                     "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
                     "OOS RMSE": st.column_config.NumberColumn("OOS RMSE", format="%.2f"),
                     "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
-                    "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
                 },
             )
 
