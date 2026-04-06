@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import importlib.util
 from pathlib import Path
+import sys
 
 import data_processing as dp
 import numpy as np
@@ -275,6 +276,7 @@ def load_v10_pipeline_module():
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load {BUILD_STATE_DIVISION_MODELS_PATH.name}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
