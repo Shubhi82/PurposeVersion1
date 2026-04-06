@@ -120,6 +120,49 @@ PRESCREEN_COL    = "Prescreen"
 ADSTOCK_COLS     = ["DSP", "LeadGen", "Paid Search", "Paid Social", "Referrals", "Sweepstakes"]
 
 # ---------------------------------------------------------------------------
+# V10 MMM Constants
+# ---------------------------------------------------------------------------
+V10_PRESETS: dict = {
+    "Config 1 — No adstock  (baseline, raw spend)": {
+        "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
+        "media_transform_config": {},
+        "note": (
+            "Raw DSP and Prescreen spend — no carryover effect applied. "
+            "Use this as the zero-adstock baseline to see whether carryover improves fit."
+        ),
+    },
+    "Config 2 — DSP α=0.5 · Prescreen α=0.6 · log1p": {
+        "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
+        "media_transform_config": {
+            "DSP": {"alpha": 0.5, "saturation": "log1p"},
+            "Prescreen": {"alpha": 0.6, "saturation": "log1p"},
+        },
+        "note": (
+            "Medium carryover on DSP (α=0.5) and slightly stronger on Prescreen (α=0.6). "
+            "log1p saturation caps diminishing returns on both channels."
+        ),
+    },
+    "Config 3 — DSP α=0.3 · Prescreen α=0.7 · log1p  ★ matches offline": {
+        "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
+        "media_transform_config": {
+            "DSP": {"alpha": 0.3, "saturation": "log1p"},
+            "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
+        },
+        "note": (
+            "Replicates the offline consolidated_model_diagnostics files exactly "
+            "(α_DSP=0.3, α_Prescreen=0.7, log1p saturation on both). "
+            "Select this config to validate the Streamlit results against the notebook."
+        ),
+    },
+}
+
+V10_DUMMY_FAMILIES_MAP: dict = {
+    "Weekly only  (W_2 … W_52)": ["weekly"],
+    "Biweekly only  (F_1 … F_25)": ["f_dummy"],
+    "Weekly + Biweekly  (both models)": ["weekly", "f_dummy"],
+}
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
@@ -310,54 +353,106 @@ def build_v10_digital_modeling_file() -> tuple[pd.DataFrame, Path]:
     return export_df, MODELING_FILE_DIGITAL_PATH
 
 
-def summarize_v10_physical_runs(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if run_v6_iterations_for_entity is None:
-        raise ValueError("Physical iteration pipeline is not available in this deployment.")
+def summarize_v10_physical_runs(
+    frame: pd.DataFrame,
+    dummy_families: list | None = None,
+) -> tuple:
+    """Run V6 iterations for every Physical state and return (all_df, best_df).
+
+    Parameters
+    ----------
+    frame : pd.DataFrame
+        Full Physical modeling frame from build_v7_modeling_frame("PHYSICAL").
+    dummy_families : list[str] | None
+        Subset of ["weekly", "f_dummy"] to run.  ``None`` → run both.
+    """
+    from data_processing import V6_ITERATIONS, fit_v6_iteration, TACTIC_COLS_V5
+
+    if dummy_families is None:
+        dummy_families = ["weekly", "f_dummy"]
+    allowed_families = set(dummy_families)
+
+    # Build a lookup so we know each iteration's dummy family
+    iter_family_map = {cfg["num"]: cfg["dummy_family"] for cfg in V6_ITERATIONS}
 
     states = sorted(frame["STATE_CD"].dropna().astype(str).unique().tolist())
-    all_rows: list[dict] = []
+    all_rows: list = []
 
-    for state in states:
-        diag_df = run_v6_iterations_for_entity(frame, "state", state, "PHYSICAL")
-        if diag_df is None or diag_df.empty:
-            continue
-        for _, row in diag_df.iterrows():
-            result = row["_result"]
+    progress = st.progress(0, text="Running Physical iterations…")
+    for s_idx, state in enumerate(states):
+        progress.progress(
+            (s_idx + 1) / len(states),
+            text=f"Physical — state {state}  ({s_idx+1}/{len(states)})",
+        )
+        entity_df = frame[frame["STATE_CD"] == state].copy()
+        entity_df = entity_df.sort_values(["ISO_YEAR", "ISO_WEEK"]).reset_index(drop=True)
+
+        for cfg in V6_ITERATIONS:
+            if cfg["dummy_family"] not in allowed_families:
+                continue
+
+            try:
+                result = fit_v6_iteration(
+                    entity_df,
+                    "PHYSICAL",
+                    dummy_family=cfg["dummy_family"],
+                    prescreen_transform=cfg["prescreen_transform"],
+                    add_interaction=cfg["add_interaction"],
+                    drop_prescreen=cfg["drop_prescreen"],
+                    log_tactics=cfg.get("log_tactics"),
+                )
+            except Exception:
+                result = None
+
+            if result is None:
+                continue
+
             y_test = np.asarray(result["y_test_actual"], dtype=float)
             y_pred = np.asarray(result["y_test_pred"], dtype=float)
             if len(y_test) > 0:
                 oos_rmse = float(np.sqrt(np.mean((y_test - y_pred) ** 2)))
                 mask = y_test != 0
-                oos_mape = float(np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100) if mask.any() else np.nan
+                oos_mape = (
+                    float(np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100)
+                    if mask.any()
+                    else np.nan
+                )
+                test_r2 = float(result["Test_R2"])
             else:
-                oos_rmse = np.nan
-                oos_mape = np.nan
+                oos_rmse = oos_mape = test_r2 = np.nan
 
-            all_rows.append({
-                "Iteration": int(row["iteration"]),
-                "Iteration Name": row["label"],
-                "State": state,
-                "Channel": "PHYSICAL",
-                "R2": float(row["R2"]),
-                "AdjR2": float(row["AdjR2"]),
-                "MAE": float(row["MAE"]),
-                "MAPE": float(row["MAPE"]),
-                "RMSE": float(row["RMSE"]),
-                "Test_R2": float(row["Test_R2"]),
-                "OOS RMSE": oos_rmse,
-                "OOS MAPE": oos_mape,
-            })
+            all_rows.append(
+                {
+                    "Iteration": int(cfg["num"]),
+                    "Iteration Name": cfg["label"],
+                    "dummy_family": cfg["dummy_family"],
+                    "State": state,
+                    "Channel": "PHYSICAL",
+                    "R2": round(float(result["R2"]), 6),
+                    "AdjR2": round(float(result["AdjR2"]), 6),
+                    "MAE": round(float(result["MAE"]), 6),
+                    "MAPE": round(float(result["MAPE"]), 6),
+                    "RMSE": round(float(result["RMSE"]), 6),
+                    "Test_R2": round(test_r2, 6) if not np.isnan(test_r2) else np.nan,
+                    "OOS RMSE": round(oos_rmse, 6) if not np.isnan(oos_rmse) else np.nan,
+                    "OOS MAPE": round(oos_mape, 6) if not np.isnan(oos_mape) else np.nan,
+                }
+            )
+
+    progress.empty()
 
     all_df = pd.DataFrame(all_rows)
     if all_df.empty:
         return all_df, all_df
 
     all_df = all_df.sort_values(["State", "Iteration"]).reset_index(drop=True)
-    all_df.to_csv(PHYSICAL_WEEKLY_ITERATIONS_PATH, index=False)
-    all_df.to_csv(PHYSICAL_ALL_STATES_ITERATIONS_PATH, index=False)
 
+    # Best iteration per state = lowest OOS MAPE, then highest R2, then lowest iteration number
     best_df = (
-        all_df.sort_values(["State", "OOS MAPE", "R2", "Iteration"], ascending=[True, True, False, True])
+        all_df.sort_values(
+            ["State", "OOS MAPE", "R2", "Iteration"],
+            ascending=[True, True, False, True],
+        )
         .groupby("State", as_index=False)
         .first()
         .reset_index(drop=True)
@@ -366,39 +461,67 @@ def summarize_v10_physical_runs(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
     return all_df, best_df
 
 
-def run_v10_combined_pipeline() -> dict[str, pd.DataFrame | str]:
+def run_v10_combined_pipeline(
+    preset_key: str | None = None,
+    dummy_families: list | None = None,
+) -> dict:
+    """Run the combined Digital (new pipeline) + Physical (V6 iterations) workflow.
+
+    Parameters
+    ----------
+    preset_key : str | None
+        Key from V10_PRESETS.  Defaults to Config 3 (matches offline files).
+    dummy_families : list[str] | None
+        Subset of ["weekly", "f_dummy"]. Defaults to ["weekly"].
+    """
+    if preset_key is None:
+        preset_key = list(V10_PRESETS.keys())[2]   # Config 3 by default
+    if dummy_families is None:
+        dummy_families = ["weekly"]
+
+    preset = V10_PRESETS[preset_key]
+    optional_features = preset["optional_features"]
+    media_transform_config = preset["media_transform_config"]
+    methodologies = ["OLS"] + dummy_families
+
+    st.info("Building Digital modeling file…")
     digital_export_df, modeling_path = build_v10_digital_modeling_file()
     module = load_v10_pipeline_module()
-    digital_states = sorted(digital_export_df["STATE_CD"].dropna().astype(str).unique().tolist())
+    digital_states = sorted(
+        digital_export_df["STATE_CD"].dropna().astype(str).unique().tolist()
+    )
 
+    st.info(f"Running Digital pipeline — {len(digital_states)} states, methodologies: {methodologies}…")
     digital_diag = module.run_model_pipeline(
         input_path=str(modeling_path),
         output_dir=str(DIGITAL_MODEL_ARTIFACTS_DIR),
         selected_states=digital_states,
         selected_divisions=["__SKIP_DIVISIONS__"],
-        methodologies=["OLS", "weekly"],
-        media_transform_config={
-            "DSP": {"alpha": 0.5, "saturation": "log1p"},
-            "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
-        },
-        optional_features=["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
+        methodologies=methodologies,
+        media_transform_config=media_transform_config,
+        optional_features=optional_features,
         backtest_mode="rolling_one_step_fixed_window",
         fixed_window_weeks=104,
     )
 
     digital_summary = (
-        digital_diag.loc[
-            digital_diag["scope"] == "state",
-            ["entity", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2", "dummy_family"],
-        ]
+        digital_diag.loc[digital_diag["scope"] == "state"]
         .rename(columns={"entity": "State"})
-        .sort_values("State")
+        [["State", "model_type", "dummy_family", "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2"]]
+        .sort_values(["State", "dummy_family"])
         .reset_index(drop=True)
     )
-    digital_summary["Needs Review"] = np.where(digital_summary["Test_R2"] < 0, "Yes", "No")
+    digital_summary["Needs Review"] = np.where(
+        pd.to_numeric(digital_summary["Test_R2"], errors="coerce") < 0, "Yes", "No"
+    )
 
-    physical_frame = build_v7_modeling_frame("PHYSICAL").copy()
-    physical_all, physical_summary = summarize_v10_physical_runs(physical_frame)
+    st.info("Building Physical modeling frame…")
+    physical_frame = cached_build_v7_modeling_frame("PHYSICAL").copy()
+
+    st.info(f"Running Physical iterations — {physical_frame['STATE_CD'].nunique()} states…")
+    physical_all, physical_summary = summarize_v10_physical_runs(
+        physical_frame, dummy_families=dummy_families
+    )
 
     return {
         "digital_modeling_file": str(modeling_path),
@@ -406,6 +529,8 @@ def run_v10_combined_pipeline() -> dict[str, pd.DataFrame | str]:
         "digital_diagnostics": digital_diag,
         "physical_all": physical_all,
         "physical_summary": physical_summary,
+        "preset_key": preset_key,
+        "dummy_families": dummy_families,
     }
 
 
@@ -3581,155 +3706,412 @@ def render_tab_mmm_v9() -> None:
             })
             st.dataframe(coef_rows, use_container_width=True, hide_index=True)
 
-# =============================================================================
-# VERSION 10 — drop-in replacement block for streamlit_app.py
-#
-V10_PRESETS = {
-    "Config 1 — No adstock": {
-        "optional_features": ["time_index_sq"],
-        "media_transform_config": {},
-    },
-    "Config 2 — DSP α=0.5 · Prescreen α=0.6": {
-        "optional_features": ["time_index_sq"],
-        "media_transform_config": {
-            "DSP": {"alpha": 0.5, "saturation": "log1p"},
-            "Prescreen": {"alpha": 0.6, "saturation": "log1p"},
-        },
-    },
-    "Config 3 — DSP α=0.3 · Prescreen α=0.7 ★": {
-        "optional_features": ["time_index_sq"],
-        "media_transform_config": {
-            "DSP": {"alpha": 0.3, "saturation": "log1p"},
-            "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
-        },
-    },
-}
 
-V10_DUMMY_FAMILIES_MAP = {
-    "Weekly": ["weekly"],
-    "Biweekly": ["f_dummy"],
-    "Both": ["weekly", "f_dummy"],
-}
+def render_tab_mmm_v10() -> None:
+    # ---- check required files ----
+    dm_diff_path = getattr(dp, "DM_DIFF_PATH", None)
+    missing = [
+        p.name
+        for p in [MARKETING_SPEND_PATH, ORIGINATIONS_V5_PATH, BUILD_STATE_DIVISION_MODELS_PATH]
+        if not p.exists()
+    ]
+    if dm_diff_path and not dm_diff_path.exists():
+        missing.append(dm_diff_path.name)
 
-# =========================================================
-# ================== V10 HELPERS ============================
-# =========================================================
-
-def load_v10_pipeline_module():
-    spec = importlib.util.spec_from_file_location(
-        "pipeline", BUILD_STATE_DIVISION_MODELS_PATH
+    # ---- intro ----
+    render_version_intro(
+        "Version 10 — Digital New Pipeline · Physical Old Pipeline",
+        [
+            "Select a **model configuration** (adstock / saturation settings) and a "
+            "**seasonal structure** (weekly dummies, biweekly dummies, or both).",
+            "**Digital:** runs through `build_state_division_models.py` using OLS, "
+            "rolling one-step fixed-window backtest (104-week window), "
+            "DSP + Prescreen adstock per the chosen config.",
+            "**Physical:** runs the V6 iteration pipeline (16 iterations, OLS only) "
+            "filtered to the chosen seasonal structure.",
+            "Both channels now run over **all available states** in the data.",
+            "A **State Analysis** tab flags states with negative Test R² or OOS MAPE > 40%.",
+        ],
+        note=(
+            "★  **Config 3** (DSP α=0.3, Prescreen α=0.7, log1p) replicates the "
+            "offline `consolidated_model_diagnostics_*.xlsx` files exactly and should "
+            "be your starting point for validation."
+        ),
     )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline"] = module
-    spec.loader.exec_module(module)
-    return module
 
+    if missing:
+        st.error(f"Missing Version 10 input files: {', '.join(sorted(set(missing)))}")
+        return
 
-def build_v10_digital_modeling_file():
-    df = dp.prepare_modeling_dataset()
-    path = MODELING_FILE_DIGITAL_PATH
-    df.to_csv(path, index=False)
-    return df, path
+    # ---- controls ----
+    st.markdown("### Configuration")
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        preset_key = st.selectbox(
+            "Model Configuration",
+            list(V10_PRESETS.keys()),
+            index=2,          # default = Config 3 (matches offline)
+            key="v10_preset",
+            help="Defines adstock carryover and log saturation applied to DSP and Prescreen.",
+        )
+    with cc2:
+        family_label = st.selectbox(
+            "Seasonal Structure",
+            list(V10_DUMMY_FAMILIES_MAP.keys()),
+            index=0,          # default = Weekly only
+            key="v10_family",
+            help="Controls which seasonal dummy columns are included in the model.",
+        )
 
-
-def cached_build_v7_modeling_frame(channel):
-    return build_v7_modeling_frame(channel=channel)
-
-
-# =========================================================
-# ================== V10 PIPELINE ==========================
-# =========================================================
-
-def run_v10_combined_pipeline(preset_key, dummy_families):
-
+    chosen_families = V10_DUMMY_FAMILIES_MAP[family_label]
     preset = V10_PRESETS[preset_key]
-
-    # -------- DIGITAL --------
-    digital_df, modeling_path = build_v10_digital_modeling_file()
-    module = load_v10_pipeline_module()
-
-    digital_diag = module.run_model_pipeline(
-        input_path=str(modeling_path),
-        output_dir=str(DIGITAL_MODEL_ARTIFACTS_DIR),
-        selected_states=sorted(digital_df["STATE_CD"].unique()),
-        methodologies=["OLS"] + dummy_families,
-        media_transform_config=preset["media_transform_config"],
-        optional_features=preset["optional_features"],
+    st.info(f"**Config note:** {preset['note']}")
+    st.caption(
+        f"**Optional features:** {', '.join(preset['optional_features'])}  ·  "
+        f"**Media transforms:** {preset['media_transform_config'] or 'none (raw spend)'}  ·  "
+        f"**Dummy families:** {', '.join(chosen_families)}"
     )
 
-    digital_summary = digital_diag[
-        digital_diag["scope"] == "state"
-    ][["entity", "R2", "MAPE", "Test_R2"]].rename(columns={"entity": "State"})
-
-    # -------- PHYSICAL --------
-    physical_frame = cached_build_v7_modeling_frame("PHYSICAL")
-
-    physical_summary = physical_frame.groupby("STATE_CD")["APPLICATIONS"].sum().reset_index()
-
-    return digital_summary, physical_summary
-
-
-# =========================================================
-# ================== V10 TAB ===============================
-# =========================================================
-
-def render_tab_mmm_v10():
-
-    st.title("Version 10 — Final MMM")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        preset = st.selectbox("Config", list(V10_PRESETS.keys()), index=2)
-
-    with col2:
-        dummy_label = st.selectbox("Seasonality", list(V10_DUMMY_FAMILIES_MAP.keys()))
-
-    if st.button("Run V10"):
-
-        dummy_families = V10_DUMMY_FAMILIES_MAP[dummy_label]
-
-        with st.spinner("Running full pipeline..."):
-
-            digital, physical = run_v10_combined_pipeline(
-                preset, dummy_families
+    run_v10 = st.button("▶ Run V10 for All States", key="v10_run")
+    if run_v10:
+        try:
+            results = run_v10_combined_pipeline(
+                preset_key=preset_key,
+                dummy_families=chosen_families,
             )
+            st.session_state["v10_results"] = results
+        except Exception as exc:
+            st.error(f"Version 10 run failed: {exc}")
+            return
 
-        st.subheader("Digital Results")
-        st.dataframe(digital)
+    results = st.session_state.get("v10_results")
+    if not results:
+        st.info(
+            "Select a configuration and seasonal structure, then click "
+            "**▶ Run V10 for All States**."
+        )
+        return
 
-        st.subheader("Physical Results")
-        st.dataframe(physical)
+    # ---- normalise summaries ----
+    digital_summary = normalize_v10_digital_summary(
+        results.get("digital_summary"),
+        diagnostics_df=results.get("digital_diagnostics"),
+    )
+    physical_all_raw = results.get("physical_all", pd.DataFrame())
+    physical_summary = normalize_v10_physical_summary(
+        results.get("physical_summary"),
+        all_df=physical_all_raw,
+    )
 
+    if digital_summary.empty and physical_summary.empty:
+        st.warning(
+            "Cached results don't match the current layout. "
+            "Click **▶ Run V10 for All States** to refresh."
+        )
+        return
 
-# =========================================================
-# ================== MAIN APP ==============================
-# =========================================================
+    # ---- headline metrics ----
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    dig_neg = int((pd.to_numeric(digital_summary["Test_R2"], errors="coerce") < 0).sum())
+    phy_flag = int((physical_summary.get("Needs Review", pd.Series(dtype=str)) == "Yes").sum()) if not physical_summary.empty else 0
 
-def main():
+    k1.metric("Digital States", f"{digital_summary['State'].nunique():,}" if "State" in digital_summary else "—")
+    k2.metric("Digital Negative Test R²", f"{dig_neg:,}", delta="needs review" if dig_neg else "all OK", delta_color="inverse" if dig_neg else "normal")
+    k3.metric("Config", results.get("preset_key", "—")[:12] + "…", help=results.get("preset_key", ""))
+    k4.metric("Families", ", ".join(results.get("dummy_families", [])))
+    k5.metric("Physical States", f"{physical_summary['State'].nunique():,}" if not physical_summary.empty and "State" in physical_summary else "—")
+    k6.metric("Physical Flags (OOS MAPE>40%)", f"{phy_flag:,}", delta="needs review" if phy_flag else "all OK", delta_color="inverse" if phy_flag else "normal")
 
-    st.set_page_config(layout="wide")
-
-    tabs = st.tabs([
-        "Overview",
-        "V1",
-        "V2",
-        "V3",
-        "V4",
-        "V5",
-        "V6",
-        "V7",
-        "V8",
-        "V9",
-        "V10"
+    # ============================================================
+    # SUB-TABS
+    # ============================================================
+    sub_tabs = st.tabs([
+        "💻 Digital Summary",
+        "🏛️ Physical Summary",
+        "🔍 State Analysis",
+        "📁 Saved Outputs",
     ])
 
-    with tabs[-1]:
-        render_tab_mmm_v10()
+    # ----------------------------------------------------------
+    # SUB-TAB 1 — Digital Summary
+    # ----------------------------------------------------------
+    with sub_tabs[0]:
+        st.markdown("**Digital — new state-level pipeline summary**")
+
+        if digital_summary.empty:
+            st.warning("No Digital results available.")
+        else:
+            disp_cols = [c for c in ["State", "model_type", "dummy_family", "R2", "AdjR2",
+                                     "MAE", "MAPE", "RMSE", "Test_R2", "Needs Review"]
+                         if c in digital_summary.columns]
+            st.dataframe(
+                digital_summary[disp_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "R2": st.column_config.NumberColumn("Train R²", format="%.4f"),
+                    "AdjR2": st.column_config.NumberColumn("Adj R²", format="%.4f"),
+                    "MAE": st.column_config.NumberColumn("MAE", format="%.2f"),
+                    "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                    "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
+                    "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
+                },
+            )
+
+            flagged = digital_summary[digital_summary.get("Needs Review", pd.Series(dtype=str)) == "Yes"]
+            if flagged.empty:
+                st.success("All Digital states have non-negative Test R².")
+            else:
+                st.warning(
+                    "Digital states with negative Test R² (rolling OOS evaluation failed to beat the mean): "
+                    + ", ".join(flagged["State"].astype(str).tolist())
+                )
+                st.caption(
+                    "A negative Test R² does **not** mean the model is broken — it means the "
+                    "rolling one-step-ahead forecast for early 2026 underperformed a naïve mean "
+                    "predictor. Check whether 2026 spend or application levels are unusually "
+                    "different from the 2024-2025 training window for these states."
+                )
+
+    # ----------------------------------------------------------
+    # SUB-TAB 2 — Physical Summary
+    # ----------------------------------------------------------
+    with sub_tabs[1]:
+        st.markdown("**Physical — V6 iteration pipeline best-per-state summary**")
+
+        if physical_summary.empty:
+            st.warning("No Physical results available.")
+        else:
+            phy_cols = [c for c in ["State", "Iteration", "Iteration Name", "dummy_family",
+                                    "R2", "AdjR2", "MAE", "MAPE", "RMSE", "Test_R2",
+                                    "OOS MAPE", "Needs Review"]
+                        if c in physical_summary.columns]
+            st.dataframe(
+                physical_summary[phy_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "R2": st.column_config.NumberColumn("Train R²", format="%.4f"),
+                    "AdjR2": st.column_config.NumberColumn("Adj R²", format="%.4f"),
+                    "MAE": st.column_config.NumberColumn("MAE", format="%.2f"),
+                    "MAPE": st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                    "RMSE": st.column_config.NumberColumn("RMSE", format="%.2f"),
+                    "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
+                    "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
+                },
+            )
+
+            flagged_phy = physical_summary[physical_summary.get("Needs Review", pd.Series(dtype=str)) == "Yes"]
+            if flagged_phy.empty:
+                st.success("All Physical states are within the OOS MAPE threshold.")
+            else:
+                st.warning(
+                    "Physical states with OOS MAPE > 40%: "
+                    + ", ".join(flagged_phy["State"].astype(str).tolist())
+                )
+
+            with st.expander("📋 All Physical iterations detail"):
+                if not physical_all_raw.empty:
+                    st.dataframe(
+                        physical_all_raw,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "R2": st.column_config.NumberColumn("Train R²", format="%.4f"),
+                            "Test_R2": st.column_config.NumberColumn("Test R²", format="%.4f"),
+                            "OOS MAPE": st.column_config.NumberColumn("OOS MAPE (%)", format="%.2f"),
+                        },
+                    )
+
+    # ----------------------------------------------------------
+    # SUB-TAB 3 — State Analysis
+    # ----------------------------------------------------------
+    with sub_tabs[2]:
+        st.markdown("### State-Level Fit Analysis")
+        st.caption(
+            "This tab shows which states have poor out-of-sample fit and likely "
+            "need manual review before being used for forecasting."
+        )
+
+        ch_sel = st.radio("Channel", ["Digital", "Physical"], horizontal=True, key="v10_ana_ch")
+
+        if ch_sel == "Digital":
+            ana_df = digital_summary.copy() if not digital_summary.empty else pd.DataFrame()
+            r2_col = "Test_R2"
+            mape_col = "MAPE"
+            flag_col = "Needs Review"
+        else:
+            ana_df = physical_summary.copy() if not physical_summary.empty else pd.DataFrame()
+            r2_col = "Test_R2"
+            mape_col = "OOS MAPE"
+            flag_col = "Needs Review"
+
+        if ana_df.empty:
+            st.info("No results to analyse yet.")
+        else:
+            # ---- convert numeric cols ----
+            for col in [r2_col, mape_col]:
+                if col in ana_df.columns:
+                    ana_df[col] = pd.to_numeric(ana_df[col], errors="coerce")
+
+            # ---- aggregate to one row per state if multiple dummy families ----
+            if "dummy_family" in ana_df.columns and len(chosen_families) > 1:
+                # show best Test_R2 row per state across families
+                if r2_col in ana_df.columns:
+                    ana_agg = (
+                        ana_df.sort_values(r2_col, ascending=False)
+                        .groupby("State", as_index=False)
+                        .first()
+                        .reset_index(drop=True)
+                    )
+                else:
+                    ana_agg = ana_df.groupby("State", as_index=False).first().reset_index(drop=True)
+                st.caption("Showing best Test R² per state across the selected dummy families.")
+            else:
+                ana_agg = ana_df.copy()
+
+            if r2_col not in ana_agg.columns:
+                st.warning(f"Column '{r2_col}' not found in results.")
+            else:
+                ana_sorted = ana_agg.sort_values(r2_col, ascending=True).reset_index(drop=True)
+
+                # ---- bar chart: Test R2 by state ----
+                bar_colors = [
+                    "#E45756" if v < 0 else "#54A24B"
+                    for v in ana_sorted[r2_col].fillna(0)
+                ]
+                fig_r2 = go.Figure(
+                    go.Bar(
+                        x=ana_sorted[r2_col],
+                        y=ana_sorted["State"],
+                        orientation="h",
+                        marker_color=bar_colors,
+                        hovertemplate="State: %{y}<br>Test R²: %{x:.4f}<extra></extra>",
+                    )
+                )
+                fig_r2.add_vline(x=0, line_color="black", line_width=1.5)
+                fig_r2.update_layout(
+                    title=f"{ch_sel} Test R² by State  (red = negative, i.e. worse than mean predictor)",
+                    xaxis_title="Test R²",
+                    yaxis_title="State",
+                    height=max(420, len(ana_sorted) * 22),
+                    margin=dict(l=10, r=10, t=50, b=10),
+                )
+                st.plotly_chart(fig_r2, use_container_width=True, key="v10_ana_r2_bar")
+
+                # ---- MAPE scatter ----
+                if mape_col in ana_agg.columns:
+                    fig_mape = go.Figure(
+                        go.Bar(
+                            x=ana_sorted[mape_col],
+                            y=ana_sorted["State"],
+                            orientation="h",
+                            marker_color=[
+                                "#E45756" if v > 40 else "#4C78A8"
+                                for v in ana_sorted[mape_col].fillna(0)
+                            ],
+                            hovertemplate="State: %{y}<br>MAPE: %{x:.2f}%<extra></extra>",
+                        )
+                    )
+                    fig_mape.add_vline(x=40, line_color="orange", line_width=1.5, line_dash="dash",
+                                       annotation_text="40 % threshold", annotation_position="top right")
+                    fig_mape.update_layout(
+                        title=f"{ch_sel} {'MAPE' if mape_col == 'MAPE' else 'OOS MAPE'} by State  (red = above 40 %)",
+                        xaxis_title="MAPE (%)",
+                        yaxis_title="State",
+                        height=max(420, len(ana_sorted) * 22),
+                        margin=dict(l=10, r=10, t=50, b=10),
+                    )
+                    st.plotly_chart(fig_mape, use_container_width=True, key="v10_ana_mape_bar")
+
+                # ---- summary table ----
+                st.markdown("**States needing review**")
+                if flag_col in ana_agg.columns:
+                    flagged_ana = ana_agg[ana_agg[flag_col] == "Yes"].copy()
+                else:
+                    flagged_ana = ana_agg[pd.to_numeric(ana_agg[r2_col], errors="coerce") < 0].copy()
+
+                if flagged_ana.empty:
+                    st.success(f"No {ch_sel} states require immediate review under this configuration.")
+                else:
+                    n_flag = len(flagged_ana)
+                    n_total = len(ana_agg)
+                    st.warning(
+                        f"{n_flag} / {n_total} {ch_sel} states are flagged for review."
+                    )
+                    show_cols = [c for c in ["State", "dummy_family", r2_col, mape_col, flag_col]
+                                 if c in flagged_ana.columns]
+                    st.dataframe(
+                        flagged_ana[show_cols].sort_values(r2_col, ascending=True),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            r2_col: st.column_config.NumberColumn("Test R²", format="%.4f"),
+                            mape_col: st.column_config.NumberColumn("MAPE (%)", format="%.2f"),
+                        },
+                    )
+
+                # ---- possible causes explainer ----
+                with st.expander("📖 Why might Test R² be negative?"):
+                    st.markdown(
+                        """
+**Possible causes and what to check:**
+
+| Cause | What to look for |
+|---|---|
+| **Structural break in 2026** | Sudden change in applications or spend in Jan–Feb 2026 for this state |
+| **Very low test volume** | State has few weekly applications, making any prediction error large relative to variance |
+| **Seasonal pattern shift** | Weekly/biweekly dummies capture 2024–2025 seasonality but 2026 is different |
+| **Over-fitted training model** | High Train R² but negative Test R² → model memorised training noise |
+| **Short 104-week window** | Fixed window may not contain the right signal for states with irregular spend |
+| **No real spend signal** | State has near-zero DSP/Prescreen, so the model is just fitting seasonal dummies |
+
+**Recommended next steps:**
+1. Plot Actual vs Predicted for the flagged state to visually diagnose the issue.
+2. Try **Config 1 (no adstock)** — sometimes a simpler model generalises better.
+3. Try **Biweekly only** — the 52-dummy weekly model can overfit.
+4. Consider removing the state from the production forecast and using a division-level model instead.
+                        """
+                    )
+
+    # ----------------------------------------------------------
+    # SUB-TAB 4 — Saved Outputs
+    # ----------------------------------------------------------
+    with sub_tabs[3]:
+        st.markdown("**Output files written during this run**")
+        output_rows = [
+            {"Output": "Digital modeling file", "Path": results.get("digital_modeling_file", "—")},
+            {
+                "Output": "Digital diagnostics CSV",
+                "Path": str(DIGITAL_MODEL_ARTIFACTS_DIR / "consolidated_model_diagnostics.csv"),
+            },
+            {"Output": "Physical iterations CSV", "Path": str(PHYSICAL_WEEKLY_ITERATIONS_PATH)},
+            {"Output": "Physical all-states CSV", "Path": str(PHYSICAL_ALL_STATES_ITERATIONS_PATH)},
+        ]
+        st.dataframe(pd.DataFrame(output_rows), use_container_width=True, hide_index=True)
+        st.caption(
+            f"Active config: **{results.get('preset_key', '—')}** · "
+            f"Dummy families: **{', '.join(results.get('dummy_families', []))}**"
+        )
 
 
-if __name__ == "__main__":
-    main()
+# =============================================================================
+# Tab layout
+# =============================================================================
+tabs = st.tabs([
+    "📊 Marketing Spend EDA",
+    "📈 Originations EDA",
+    "🔬 V1",
+    "🧪 V2",
+    "🧩 V3",
+    "🧱 V4",
+    "🔬 V5",
+    "📐 V6",
+    "🧮 V7",
+    "⚖️ V8",
+    "🚀 V9",
+    "🧭 V10",
+])
 
 with tabs[0]:
     render_tab_marketing_spend()
