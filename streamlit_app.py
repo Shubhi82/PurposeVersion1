@@ -137,7 +137,18 @@ V10_PRESETS: dict = {
             "Use this as the zero-adstock baseline to see whether carryover improves fit."
         ),
     },
-    "Config 2 — DSP α=0.5 · Prescreen α=0.6 · log1p": {
+    "Config 2 — DSP α=0.3 · Prescreen α=0.7 · log1p · 4w avg": {
+        "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
+        "media_transform_config": {
+            "DSP": {"alpha": 0.3, "saturation": "log1p"},
+            "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
+        },
+        "note": (
+            "DSP α=0.3, Prescreen α=0.7, log1p saturation on both, 4-week trailing average. "
+            "Matches the offline consolidated_model_diagnostics_Digital.xlsx exactly."
+        ),
+    },
+    "Config 3 — DSP α=0.5 · Prescreen α=0.6 · log1p · 4w avg": {
         "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
         "media_transform_config": {
             "DSP": {"alpha": 0.5, "saturation": "log1p"},
@@ -148,17 +159,6 @@ V10_PRESETS: dict = {
             "log1p saturation caps diminishing returns on both channels."
         ),
     },
-    "Config 3 — DSP α=0.3 · Prescreen α=0.7 · log1p": {
-        "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
-        "media_transform_config": {
-            "DSP": {"alpha": 0.3, "saturation": "log1p"},
-            "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
-        },
-        "note": (
-            "DSP α=0.3, Prescreen α=0.7, log1p saturation on both. "
-            "4-week trailing average of NON_DM_APPLICATIONS included as optional feature."
-        ),
-    },
     "Config 4 — DSP α=0.3 · Prescreen α=0.7 · log1p · 2w avg": {
         "optional_features": ["time_index_sq", "NON_DM_APPLICATIONS_trailing_2w_avg"],
         "media_transform_config": {
@@ -166,8 +166,9 @@ V10_PRESETS: dict = {
             "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
         },
         "note": (
-            "Same as Config 3 but uses a 2-week trailing average of NON_DM_APPLICATIONS "
-            "instead of 4-week. Useful for markets with shorter response windows."
+            "Same adstock as Config 2 (DSP α=0.3, Prescreen α=0.7) but uses a 2-week "
+            "trailing average of NON_DM_APPLICATIONS instead of 4-week. "
+            "Useful for markets with shorter response windows."
         ),
     },
 }
@@ -432,7 +433,7 @@ def run_v10_combined_pipeline(
         States to run. None → all available states.
     """
     if preset_key is None:
-        preset_key = list(V10_PRESETS.keys())[2]   # Config 3 by default
+        preset_key = list(V10_PRESETS.keys())[1]   # Config 2 by default (matches offline diagnostics)
 
     preset = V10_PRESETS[preset_key]
     optional_features = preset["optional_features"]
@@ -3733,7 +3734,7 @@ def render_tab_mmm_v10() -> None:
         preset_key = st.selectbox(
             "Model Configuration",
             list(V10_PRESETS.keys()),
-            index=2,          # default = Config 3
+            index=1,          # default = Config 2 (matches offline diagnostics file)
             key="v10_preset",
             help="Defines adstock carryover and log saturation applied to DSP and Prescreen.",
         )
