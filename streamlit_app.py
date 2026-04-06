@@ -378,7 +378,7 @@ def run_v10_combined_pipeline() -> dict[str, pd.DataFrame | str]:
         selected_divisions=["__SKIP_DIVISIONS__"],
         methodologies=["OLS", "weekly"],
         media_transform_config={
-            "DSP": {"alpha": 0.3, "saturation": "log1p"},
+            "DSP": {"alpha": 0.5, "saturation": "log1p"},
             "Prescreen": {"alpha": 0.7, "saturation": "log1p"},
         },
         optional_features=["time_index_sq", "NON_DM_APPLICATIONS_trailing_4w_avg"],
